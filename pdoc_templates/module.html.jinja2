@@ -1,0 +1,48 @@
+{# Hide MiniBatchKMeans mirrored constructor fields from docs; keep cluster_centers + methods. #}
+{% extends "default/module.html.jinja2" %}
+
+{% defaultmacro nav_members(members) %}
+    <ul class="memberlist">
+        {% for m in members if is_public(m) | trim %}
+            {% if m.kind == "variable" and m.name != "cluster_centers" %}
+                {# Sidebar: only cluster_centers among variables #}
+            {% else %}
+            <li>
+                {% if m.kind == "class" %}
+                    <a class="class" href="#{{ m.qualname }}">{{ m.qualname }}</a>
+                    {% if m.own_members %}
+                        {{ nav_members(m.own_members) | indent(12) }}
+                    {% endif %}
+                {% elif m.kind == "module" %}
+                    <a class="module" href="#{{ m.name }}">{{ m.name }}</a>
+                {% elif m.name == "__init__" %}
+                    <a class="function" href="#{{ m.qualname }}">{{ m.qualname.split(".")[-2] }}</a>
+                {% else %}
+                    <a class="{{ m.kind }}" href="#{{ m.qualname }}">{{ m.name }}</a>
+                {% endif %}
+            </li>
+            {% endif %}
+        {% endfor %}
+    </ul>
+{% enddefaultmacro %}
+
+{% defaultmacro is_public(doc) %}
+    {#
+    Same as default, but omit MiniBatchKMeans constructor-mirrored attributes from the public API surface.
+    #}
+    {% if doc.kind == "variable" and doc.name in ["n_clusters", "verbose", "random_state", "reassignment_ratio", "device", "dtype"] %}
+    {% elif "@private" in doc.docstring %}
+    {% elif "@public" in doc.docstring %}
+        true
+    {% elif not include_undocumented and not doc.docstring and doc.kind != "module" %}
+    {% elif doc.name == "__init__" and (doc.docstring or (doc.kind == "function" and doc.signature_without_self.parameters)) %}
+        true
+    {% elif doc.name == "__doc__" %}
+    {% elif doc.kind == "variable" and doc.is_typevar and not doc.docstring %}
+    {% elif doc.kind == "module" and doc.fullname not in all_modules %}
+    {% elif (doc.qualname or doc.name) is in(module.obj.__all__ or []) %}
+        true
+    {% elif not doc.name.startswith("_") %}
+        true
+    {% endif %}
+{% enddefaultmacro %}
