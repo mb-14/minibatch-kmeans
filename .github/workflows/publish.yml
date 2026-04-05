@@ -1,0 +1,37 @@
+# Publish sdist and wheel to PyPI using Trusted Publishing (OIDC).
+# Register this workflow on PyPI: Owner mb-14, repository minibatch-kmeans,
+# workflow filename publish.yml, optional environment pypi.
+#
+# Create a GitHub Environment named "pypi" (Settings → Environments) if you use
+# environment: below; register the same name when adding the trusted publisher.
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
