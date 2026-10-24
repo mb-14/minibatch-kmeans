@@ -1,0 +1,33 @@
+[
+  {
+    "method": "minibatchkmeans",
+    "n": 2000000,
+    "n_train": 1500000,
+    "train_fraction": 0.75,
+    "k": 512,
+    "d": 4096,
+    "niter": 1,
+    "wall_time_s": 2.775130020000688,
+    "cpu_time_s": 10.748920016000014,
+    "batch_size": 16384,
+    "reassignment_ratio": 0.01,
+    "gpu_process_peak_memory_delta_bytes_nvitop": 865058816,
+    "gpu_process_peak_memory_delta_mib_nvitop": 824.984,
+    "quality": {
+      "train": {
+        "n": 1500000,
+        "wcss": 179577561339.78998,
+        "wcss_per_point": 119718.37422652665,
+        "nmi": 0.9950782526438571,
+        "ari": 0.9446616917144224
+      },
+      "val": {
+        "n": 500000,
+        "wcss": 59874006015.22969,
+        "wcss_per_point": 119748.01203045939,
+        "nmi": 0.9950980882740141,
+        "ari": 0.944811174319681
+      }
+    }
+  }
+]

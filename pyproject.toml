@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minibatch-kmeans"
-version = "0.1.1"
+version = "0.1.2"
 description = "Mini-batch k-means clustering implemented in PyTorch"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,7 +37,7 @@ dev = ["pdoc>=14"]
 eval = [
     "clustering-benchmarks>=1.1",
     "fastkmeans>=0.5.0",
-    "flash-kmeans>=0.2.0",
+    "flash-kmeans>=0.3.1",
     "matplotlib>=3.8",
     "nvitop>=1.4",
 ]

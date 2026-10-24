@@ -31,10 +31,14 @@ class _ConvergenceState:
 
 
 def _pairwise_squared_distances(X: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
-    x_sq = (X ** 2).sum(dim=1, keepdim=True)
-    c_sq = (C ** 2).sum(dim=1)  # (n_clusters,)
-    dist_sq = x_sq - 2 * X @ C.T + c_sq
-    return dist_sq
+    """Squared Euclidean distances from each row of ``X`` to each row of ``C``.
+
+    The row norms use one reduction each, and the cross term is a single
+    matrix product. That avoids a squared copy of ``X`` and a doubled copy of ``X``.
+    """
+    x_sq = torch.linalg.vector_norm(X, ord=2, dim=1, keepdim=True).square()
+    c_sq = torch.linalg.vector_norm(C, ord=2, dim=1).square()
+    return torch.addmm(c_sq, X, C.T, beta=1, alpha=-2).add_(x_sq)
 
 
 class MiniBatchKMeans:
@@ -444,12 +448,27 @@ class MiniBatchKMeans:
         self._init_centroids(X)
 
         n_steps = (max_iter * n_samples) // batch_size
+        n_features = int(X.shape[1])
+        dev = torch.device(device)
+        use_staging = dev.type == "cuda" and X.device.type == "cpu"
+        if use_staging:
+            pinned_batch = torch.empty(
+                (batch_size, n_features), dtype=X.dtype, pin_memory=True
+            )
+            gpu_batch = torch.empty(
+                (batch_size, n_features), dtype=X.dtype, device=dev
+            )
 
         for i in range(n_steps):
             mb_idx = torch.randint(
                 0, n_samples, (batch_size,), device="cpu", generator=rng
             )
-            X_batch = X[mb_idx].to(device)
+            if use_staging:
+                torch.index_select(X, 0, mb_idx, out=pinned_batch)
+                gpu_batch.copy_(pinned_batch)
+                X_batch = gpu_batch
+            else:
+                X_batch = X[mb_idx].to(device)
 
             centers_new, batch_inertia = self._mini_batch_step(
                 X_batch,

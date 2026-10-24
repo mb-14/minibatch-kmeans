@@ -1,0 +1,32 @@
+[
+  {
+    "method": "faisskmeans",
+    "n": 2000000,
+    "n_train": 1500000,
+    "train_fraction": 0.75,
+    "k": 512,
+    "d": 4096,
+    "niter": 1,
+    "wall_time_s": 3.72387274599987,
+    "cpu_time_s": 9.209789119999996,
+    "backend_iterations_done": 1,
+    "gpu_process_peak_memory_delta_bytes_nvitop": 1812447232,
+    "gpu_process_peak_memory_delta_mib_nvitop": 1728.484,
+    "quality": {
+      "train": {
+        "n": 1500000,
+        "wcss": 365779935565.5608,
+        "wcss_per_point": 243853.29037704054,
+        "nmi": 0.9432228206856251,
+        "ari": 0.45526790270412565
+      },
+      "val": {
+        "n": 500000,
+        "wcss": 121916481203.16039,
+        "wcss_per_point": 243832.96240632076,
+        "nmi": 0.9439557420213026,
+        "ari": 0.459762902463084
+      }
+    }
+  }
+]

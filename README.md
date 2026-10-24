@@ -1,13 +1,30 @@
 # minibatch-kmeans
 
-This package implements **mini-batch k-means** following [Sculley (WWW 2010)](https://doi.org/10.1145/1772690.1772862) (*Web-Scale K-Means Clustering*). [scikit-learn](https://scikit-learn.org/stable/modules/generated/sklearn.cluster.MiniBatchKMeans.html)'s `MiniBatchKMeans` is based on the same algorithm but is **CPU-only**; this library is for PyTorch pipelines that want native tensors and **GPU acceleration**.
+![PyPI](https://img.shields.io/pypi/v/minibatch-kmeans?style=flat-square)
+![Python](https://img.shields.io/pypi/pyversions/minibatch-kmeans?style=flat-square)
+![License](https://img.shields.io/github/license/mb-14/minibatch-kmeans?style=flat-square)
 
-## Requirements
+minibatch-kmeans is mini-batch k-means clustering for PyTorch tensors. The package follows Sculley's *[Web-Scale K-Means Clustering](https://doi.org/10.1145/1772690.1772862)* (WWW 2010). scikit-learn's [`MiniBatchKMeans`](https://scikit-learn.org/stable/modules/generated/sklearn.cluster.MiniBatchKMeans.html) uses the same algorithm, but it runs on CPU only.
 
-- Python **3.10+** (see `pyproject.toml`)
-- **PyTorch** 2.x (`torch>=2.0`; use [pytorch.org](https://pytorch.org/get-started/locally/) for the wheel that matches your platform / CUDA).
+## Features
 
-## Installation
+- **CPU and GPU support.** The model works directly on PyTorch tensors, on any device.
+- **Training on new data.** `partial_fit` updates the model one batch at a time, so your full dataset never has to fit in memory.
+- **Save and load.** You can save a model and continue training it later.
+
+You can read the full API reference at [mb-14.github.io/minibatch-kmeans](https://mb-14.github.io/minibatch-kmeans/).
+
+## How it works
+
+Each training step picks a small random batch of points. Each point is assigned to its nearest center, and then each center moves toward the points assigned to it. Every center keeps a count of the points it has seen. Its learning rate is 1 divided by that count, so the center is always the average of all the points it has received, and it moves less as training goes on.
+
+![Algorithm 1, mini-batch k-means, adapted from Sculley (2010).](reports/figures/xkcd/minibatch_kmeans_algorithm.png)
+
+*Adapted from Algorithm 1 in D. Sculley, [Web-Scale K-Means Clustering](https://doi.org/10.1145/1772690.1772862), WWW 2010.*
+
+## Install
+
+You need Python 3.10 or newer. Install a PyTorch 2.x build for your machine first, using the selector on [pytorch.org](https://pytorch.org/get-started/locally/). Then install the package:
 
 ```bash
 pip install minibatch-kmeans
@@ -15,52 +32,77 @@ pip install minibatch-kmeans
 
 ## Quick start
 
+### Fit a tensor
+
 ```python
 import torch
 from minibatch_kmeans import MiniBatchKMeans
 
 X = torch.randn(5000, 4, dtype=torch.float32)
-km = MiniBatchKMeans(n_clusters=8, dtype=torch.float32)
+
+km = MiniBatchKMeans(n_clusters=8, random_state=torch.Generator().manual_seed(42))
 km.fit(X, batch_size=256, max_iter=20)
 labels = km.predict(X)
+
+print(labels.shape)              # torch.Size([5000])
+print(km.cluster_centers.shape)  # torch.Size([8, 4])
 ```
 
-## Incremental training
+`fit` returns the centers, and `predict` returns one label per row. `fit_predict` does both steps in one call. The input dtype must match the model's `dtype`, which is `torch.float32` by default. Pass a seeded CPU `torch.Generator` as `random_state` when you need the same result on every run.
+
+### Run on a GPU
+
+Set `device` on the model and move your data to the same device:
 
 ```python
-km = MiniBatchKMeans(n_clusters=8, dtype=torch.float32)
+km = MiniBatchKMeans(n_clusters=8, device=torch.device("cuda"))
+labels = km.fit_predict(X.cuda(), batch_size=256)
+```
+
+### Train on new batches
+
+`partial_fit` updates the centers with every row of the batch you pass in. Use it when data arrives as a stream or does not fit in memory.
+
+```python
+km = MiniBatchKMeans(n_clusters=8)
 for batch in X.split(256):
     km.partial_fit(batch)
 labels = km.predict(X)
 ```
 
-Example notebook: [notebooks/partial_fit_demo.ipynb](notebooks/partial_fit_demo.ipynb)
+The notebook [notebooks/partial_fit_demo.ipynb](notebooks/partial_fit_demo.ipynb) walks through this step by step.
 
-## Documentation
+### Save and load a model
 
-API reference: **[mb-14.github.io/minibatch-kmeans](https://mb-14.github.io/minibatch-kmeans/)**
+```python
+km.save("kmeans.pt")
 
-## Benchmarks & evaluation
+km2 = MiniBatchKMeans.load("kmeans.pt")                                  # loads on CPU
+km_gpu = MiniBatchKMeans.load("kmeans.pt", device=torch.device("cuda"))  # loads on a GPU
+```
 
-See **[evaluation/README.md](evaluation/README.md)** for benchmarks and evaluation.
+> [!WARNING]
+> `load` uses `torch.load` without `weights_only`, so it can run code stored in the file. Load only files you trust.
+
+## Benchmarks
+
+See [evaluation/README.md](evaluation/README.md).
 
 ## Development
 
-```bash
-pip install -e ".[dev]"
-python -m unittest discover -s tests -v
-```
-
-Generate local API docs (HTML in `pdoc_html/`):
+Install the package in editable mode with the `dev` extra, then run the tests:
 
 ```bash
-bash scripts/gen_api_docs.sh
+conda run -n kmeans-bench pip install -e ".[dev]"
+conda run -n kmeans-bench python -m unittest discover -s tests -v
 ```
 
-## Related projects
+To build the API docs locally into `pdoc_html/`, run:
 
-- [AnswerDotAI/fastkmeans](https://github.com/AnswerDotAI/fastkmeans)
-- [svg-project/flash-kmeans](https://github.com/svg-project/flash-kmeans)
-- [Faiss wiki](https://github.com/facebookresearch/faiss/wiki)
-- [rapidsai/cuml](https://github.com/rapidsai/cuml)
+```bash
+conda run -n kmeans-bench bash scripts/gen_api_docs.sh
+```
 
+## License
+
+This project uses the [MIT License](LICENSE).
