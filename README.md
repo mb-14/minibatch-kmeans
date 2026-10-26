@@ -4,19 +4,18 @@
 ![Python](https://img.shields.io/pypi/pyversions/minibatch-kmeans?style=flat-square)
 ![License](https://img.shields.io/github/license/mb-14/minibatch-kmeans?style=flat-square)
 
-minibatch-kmeans is mini-batch k-means clustering for PyTorch tensors. The package follows Sculley's *[Web-Scale K-Means Clustering](https://doi.org/10.1145/1772690.1772862)* (WWW 2010). scikit-learn's [`MiniBatchKMeans`](https://scikit-learn.org/stable/modules/generated/sklearn.cluster.MiniBatchKMeans.html) uses the same algorithm, but it runs on CPU only.
+minibatch-kmeans is mini-batch k-means clustering for PyTorch tensors.  Unlike standard K-Means, which processes the entire dataset in each iteration, mini-batch K-Means updates cluster centers using small random batches, making it more efficient for large datasets and streaming data. The package follows Sculley's *[Web-Scale K-Means Clustering](https://doi.org/10.1145/1772690.1772862)* algorithm. scikit-learn's [`MiniBatchKMeans`](https://scikit-learn.org/stable/modules/generated/sklearn.cluster.MiniBatchKMeans.html) uses the same algorithm, but it runs on CPU only.
 
 ## Features
 
 - **CPU and GPU support.** The model works directly on PyTorch tensors, on any device.
-- **Training on new data.** `partial_fit` updates the model one batch at a time, so your full dataset never has to fit in memory.
-- **Save and load.** You can save a model and continue training it later.
+- **Incremental training.** `partial_fit` updates the model one batch at a time, so your full dataset never has to fit in memory.
 
 You can read the full API reference at [mb-14.github.io/minibatch-kmeans](https://mb-14.github.io/minibatch-kmeans/).
 
-## How it works
+## Algorithm
 
-Each training step picks a small random batch of points. Each point is assigned to its nearest center, and then each center moves toward the points assigned to it. Every center keeps a count of the points it has seen. Its learning rate is 1 divided by that count, so the center is always the average of all the points it has received, and it moves less as training goes on.
+At each training step, the algorithm samples a small random batch of data points and assigns each point to its nearest cluster center. Each center is then updated toward the points assigned to it using an incremental mean. The algorithm tracks the number of points assigned to each center and uses the inverse count as the learning rate, ensuring that each center converges to the mean of the points it has received. As training progresses, the learning rate decreases, resulting in smaller, more stable updates.
 
 ![Algorithm 1, mini-batch k-means, adapted from Sculley (2010).](reports/figures/xkcd/minibatch_kmeans_algorithm.png)
 
@@ -59,9 +58,9 @@ km = MiniBatchKMeans(n_clusters=8, device=torch.device("cuda"))
 labels = km.fit_predict(X.cuda(), batch_size=256)
 ```
 
-### Train on new batches
+### Incremental training
 
-`partial_fit` updates the centers with every row of the batch you pass in. Use it when data arrives as a stream or does not fit in memory.
+`partial_fit` updates the centers with every row of the batch you pass in.
 
 ```python
 km = MiniBatchKMeans(n_clusters=8)
