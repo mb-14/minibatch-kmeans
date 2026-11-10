@@ -1,3 +1,5 @@
+import queue
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +30,119 @@ class _ConvergenceState:
         self.ewa: float | None = None
         self.ewa_min: float | None = None
         self.no_improvement = 0
+
+
+class _BatchPrefetcher:
+    """Gathers and uploads mini-batches on a background thread.
+
+    ``X`` stays on the CPU. A worker thread draws batch indices, gathers the
+    rows into one of two pinned buffers, and copies that buffer to the GPU on
+    a side stream. While the GPU trains on batch ``i``, the worker prepares
+    batch ``i + 1``.
+
+    Slot life cycle (``slot = i % 2``):
+
+    1. Worker waits until the slot is free, then waits for that slot's
+       previous upload, so the pinned buffer is no longer being read.
+    2. Worker gathers rows into ``pinned[slot]`` and, on the copy stream,
+       waits for the training step that last used ``gpu[slot]``, then
+       uploads and records ``copied[slot]``.
+    3. :meth:`next` makes the compute stream wait for ``copied[slot]``.
+    4. :meth:`release` records ``used[slot]`` on the compute stream and
+       hands the slot back to the worker.
+    """
+
+    _N_SLOTS = 2
+
+    def __init__(
+        self,
+        X: torch.Tensor,
+        batch_size: int,
+        n_steps: int,
+        index_rng: torch.Generator,
+        device: torch.device,
+    ) -> None:
+        self._X = X
+        self._batch_size = batch_size
+        self._n_steps = n_steps
+        self._rng = index_rng
+        if device.index is None:
+            device = torch.device("cuda", torch.cuda.current_device())
+        self._device = device
+        n_features = int(X.shape[1])
+        shape = (batch_size, n_features)
+        self._pinned = [
+            torch.empty(shape, dtype=X.dtype, pin_memory=True)
+            for _ in range(self._N_SLOTS)
+        ]
+        self._gpu = [
+            torch.empty(shape, dtype=X.dtype, device=device)
+            for _ in range(self._N_SLOTS)
+        ]
+        self._copied = [torch.cuda.Event() for _ in range(self._N_SLOTS)]
+        self._used = [torch.cuda.Event() for _ in range(self._N_SLOTS)]
+        self._used_recorded = [False] * self._N_SLOTS
+        self._free = [threading.Semaphore(1) for _ in range(self._N_SLOTS)]
+        self._ready: queue.Queue = queue.Queue()
+        self._copy_stream = torch.cuda.Stream(device=device)
+        self._stop = threading.Event()
+        self._step = 0
+        self._thread = threading.Thread(
+            target=self._worker, name="minibatch-kmeans-prefetch", daemon=True
+        )
+        self._thread.start()
+
+    def _acquire(self, slot: int) -> bool:
+        while not self._stop.is_set():
+            if self._free[slot].acquire(timeout=0.1):
+                return True
+        return False
+
+    def _worker(self) -> None:
+        try:
+            torch.cuda.set_device(self._device)
+            n_samples = self._X.shape[0]
+            for i in range(self._n_steps):
+                slot = i % self._N_SLOTS
+                if not self._acquire(slot):
+                    return
+                # The previous upload from this pinned buffer must finish
+                # before the buffer is overwritten.
+                self._copied[slot].synchronize()
+                idx = torch.randint(
+                    0, n_samples, (self._batch_size,), device="cpu", generator=self._rng
+                )
+                torch.index_select(self._X, 0, idx, out=self._pinned[slot])
+                with torch.cuda.stream(self._copy_stream):
+                    if self._used_recorded[slot]:
+                        self._copy_stream.wait_event(self._used[slot])
+                    self._gpu[slot].copy_(self._pinned[slot], non_blocking=True)
+                    self._copied[slot].record(self._copy_stream)
+                self._ready.put(slot)
+        except BaseException as exc:  # surface errors in the training thread
+            self._ready.put(exc)
+
+    def next(self) -> torch.Tensor:
+        """Return the next batch on the GPU, ready for the current stream."""
+        item = self._ready.get()
+        if isinstance(item, BaseException):
+            raise item
+        slot = item
+        torch.cuda.current_stream(self._device).wait_event(self._copied[slot])
+        return self._gpu[slot]
+
+    def release(self) -> None:
+        """Mark the batch from the last :meth:`next` as no longer needed."""
+        slot = self._step % self._N_SLOTS
+        self._used[slot].record(torch.cuda.current_stream(self._device))
+        self._used_recorded[slot] = True
+        self._step += 1
+        self._free[slot].release()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join()
+        torch.cuda.current_stream(self._device).wait_stream(self._copy_stream)
 
 
 def _pairwise_squared_distances(X: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
@@ -448,48 +563,58 @@ class MiniBatchKMeans:
         self._init_centroids(X)
 
         n_steps = (max_iter * n_samples) // batch_size
-        n_features = int(X.shape[1])
         dev = torch.device(device)
         use_staging = dev.type == "cuda" and X.device.type == "cpu"
-        if use_staging:
-            pinned_batch = torch.empty(
-                (batch_size, n_features), dtype=X.dtype, pin_memory=True
-            )
-            gpu_batch = torch.empty(
-                (batch_size, n_features), dtype=X.dtype, device=dev
-            )
 
-        for i in range(n_steps):
-            mb_idx = torch.randint(
-                0, n_samples, (batch_size,), device="cpu", generator=rng
-            )
-            if use_staging:
-                torch.index_select(X, 0, mb_idx, out=pinned_batch)
-                gpu_batch.copy_(pinned_batch)
-                X_batch = gpu_batch
-            else:
-                X_batch = X[mb_idx].to(device)
+        # Batch indices come from their own generator, seeded once from
+        # ``random_state``. The prefetch thread draws them ahead of the
+        # training loop, so they must not share a generator with the
+        # reassignment code, or results would depend on thread timing.
+        index_seed = int(
+            torch.randint(0, 2**62, (1,), device="cpu", generator=rng).item()
+        )
+        index_rng = torch.Generator(device="cpu").manual_seed(index_seed)
 
-            centers_new, batch_inertia = self._mini_batch_step(
-                X_batch,
-                return_inertia=need_batch_inertia,
-            )
+        prefetcher = (
+            _BatchPrefetcher(X, batch_size, n_steps, index_rng, dev)
+            if use_staging
+            else None
+        )
+        try:
+            for i in range(n_steps):
+                if prefetcher is not None:
+                    X_batch = prefetcher.next()
+                else:
+                    mb_idx = torch.randint(
+                        0, n_samples, (batch_size,), device="cpu", generator=index_rng
+                    )
+                    X_batch = X[mb_idx].to(device)
 
-            converged = self._mini_batch_convergence(
-                i,
-                n_steps,
-                n_samples,
-                batch_size,
-                centers_new,
-                batch_inertia,
-                tol,
-                max_no_improvement,
-                inertia_convergence,
-            )
+                centers_new, batch_inertia = self._mini_batch_step(
+                    X_batch,
+                    return_inertia=need_batch_inertia,
+                )
+                if prefetcher is not None:
+                    prefetcher.release()
 
-            self._cluster_centers = centers_new
-            if converged:
-                break
+                converged = self._mini_batch_convergence(
+                    i,
+                    n_steps,
+                    n_samples,
+                    batch_size,
+                    centers_new,
+                    batch_inertia,
+                    tol,
+                    max_no_improvement,
+                    inertia_convergence,
+                )
+
+                self._cluster_centers = centers_new
+                if converged:
+                    break
+        finally:
+            if prefetcher is not None:
+                prefetcher.close()
 
         return self._cluster_centers
 

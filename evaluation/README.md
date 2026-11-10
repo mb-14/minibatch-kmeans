@@ -37,11 +37,11 @@ The speed test uses a synthetic Gaussian mixture with 512 clusters and 4,096 fea
 
 ![Seconds per million points at 1,048,576 points, one bar per method.](../reports/figures/xkcd/wall_vs_n.png)
 
-The time per point has leveled off by 1,048,576 points, so the chart shows only that size. minibatch-kmeans, fastkmeans, and Faiss each take 5.1 to 5.2 seconds per million points. flash-kmeans takes 6.4 seconds.
+The time per point has leveled off by 1,048,576 points, so the chart shows only that size. minibatch-kmeans takes 4.0 seconds per million points. fastkmeans and Faiss each take 5.1 to 5.2 seconds, and flash-kmeans takes 6.4 seconds. minibatch-kmeans prepares the next batch on a background thread and copies it to the GPU while the current batch trains, so the GPU rarely waits for data.
 
 ![Peak GPU memory during the fit, in GiB, at four sizes from 65,536 to 1,048,576 points.](../reports/figures/xkcd/mem_bars.png)
 
-minibatch-kmeans peaks at 0.56 GiB of GPU memory at every size. Faiss stays at 1.7 GiB, and fastkmeans stays near 2.7 GiB. flash-kmeans grows with the number of points, from 5.7 GiB at 65,536 points to 27.5 GiB at 1,048,576 points.
+minibatch-kmeans peaks at 0.87 GiB of GPU memory at every size. That includes a second batch buffer for the background copy. Faiss stays at 1.7 GiB, and fastkmeans stays near 2.7 GiB. flash-kmeans grows with the number of points, from 5.7 GiB at 65,536 points to 27.5 GiB at 1,048,576 points.
 
 ## Reproduce the benchmarks
 
