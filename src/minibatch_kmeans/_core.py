@@ -30,6 +30,23 @@ class _ConvergenceState:
         self.ewa_min: float | None = None
         self.no_improvement = 0
 
+    def update_ewa(self, mean_inertia: float, batch_size: int, n_samples: int) -> None:
+        """Fold ``mean_inertia`` into the exponentially weighted average."""
+        if self.ewa is None:
+            self.ewa = mean_inertia
+        else:
+            alpha = min(batch_size * 2.0 / (n_samples + 1), 1.0)
+            self.ewa = self.ewa * (1 - alpha) + mean_inertia * alpha
+
+    def stalled(self, max_no_improvement: int | None) -> bool:
+        """Track the best EWA seen; True once it fails to improve ``max_no_improvement`` times."""
+        if self.ewa_min is None or self.ewa < self.ewa_min:
+            self.no_improvement = 0
+            self.ewa_min = self.ewa
+        else:
+            self.no_improvement += 1
+        return max_no_improvement is not None and self.no_improvement >= max_no_improvement
+
 
 class _BatchPrefetcher:
     """Gathers and uploads mini-batches on a background thread.
@@ -303,7 +320,7 @@ class MiniBatchKMeans:
             self._counts = torch.zeros(self.n_clusters, dtype=X.dtype, device=device)
             self._n_since_last_reassign = 0
 
-    def _mini_batch_convergence(  # noqa: C901 - existing debt
+    def _mini_batch_convergence(
         self,
         step: int,
         n_steps: int,
@@ -322,31 +339,19 @@ class MiniBatchKMeans:
                 centers_squared_diff = 0.0
 
             step = step + 1
+            mean_inertia = None if batch_inertia is None else batch_inertia / batch_size
 
             if step == 1:
-                if batch_inertia is not None:
-                    batch_inertia = batch_inertia / batch_size
-                    if self.verbose:
-                        print(
-                            f"Minibatch step {step}/{n_steps}: mean batch inertia: {batch_inertia}"
-                        )
+                if mean_inertia is not None and self.verbose:
+                    print(f"Minibatch step {step}/{n_steps}: mean batch inertia: {mean_inertia}")
                 return False
 
-            if batch_inertia is not None:
-                batch_inertia = batch_inertia / batch_size
-                if inertia_convergence.ewa is None:
-                    inertia_convergence.ewa = batch_inertia
-                else:
-                    alpha = batch_size * 2.0 / (n_samples + 1)
-                    alpha = min(alpha, 1.0)
-                    inertia_convergence.ewa = (
-                        inertia_convergence.ewa * (1 - alpha) + batch_inertia * alpha
-                    )
-
+            if mean_inertia is not None:
+                inertia_convergence.update_ewa(mean_inertia, batch_size, n_samples)
                 if self.verbose:
                     print(
                         f"Minibatch step {step}/{n_steps}: mean batch inertia: "
-                        f"{batch_inertia}, ewa inertia: {inertia_convergence.ewa}"
+                        f"{mean_inertia}, ewa inertia: {inertia_convergence.ewa}"
                     )
 
             if tol > 0.0 and centers_squared_diff <= tol:
@@ -354,25 +359,10 @@ class MiniBatchKMeans:
                     print(f"Converged (small centers change) at step {step}/{n_steps}")
                 return True
 
-            if batch_inertia is not None:
-                if (
-                    inertia_convergence.ewa_min is None
-                    or inertia_convergence.ewa < inertia_convergence.ewa_min
-                ):
-                    inertia_convergence.no_improvement = 0
-                    inertia_convergence.ewa_min = inertia_convergence.ewa
-                else:
-                    inertia_convergence.no_improvement += 1
-
-                if (
-                    max_no_improvement is not None
-                    and inertia_convergence.no_improvement >= max_no_improvement
-                ):
-                    if self.verbose:
-                        print(
-                            f"Converged (lack of improvement in inertia) at step {step}/{n_steps}"
-                        )
-                    return True
+            if mean_inertia is not None and inertia_convergence.stalled(max_no_improvement):
+                if self.verbose:
+                    print(f"Converged (lack of improvement in inertia) at step {step}/{n_steps}")
+                return True
 
             return False
 

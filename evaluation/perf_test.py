@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
+from typing import NoReturn
 
 import torch
 
@@ -244,59 +246,118 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> None:  # noqa: C901 - existing debt, split up when touched
+def _fail(msg: str) -> NoReturn:
+    print(f"evaluation.perf_test: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _validate_args(args: argparse.Namespace) -> None:
+    """Exit with an error message on the first invalid argument."""
+    checks = [
+        (
+            args.flash_warmup_runs < 0 or args.flash_timed_repeats < 1,
+            "--flash-warmup-runs must be >= 0 and --flash-timed-repeats must be >= 1.",
+        ),
+        (args.eval_chunk_rows < 1, "--eval-chunk-rows must be >= 1."),
+        (args.batch_size < 1, "--batch-size must be >= 1."),
+        (args.reassignment_ratio < 0, "--reassignment-ratio must be >= 0."),
+        (
+            args.gpu_memory_series and float(args.gpu_memory_series_interval) <= 0,
+            "--gpu-memory-series-interval must be > 0.",
+        ),
+    ]
+    for failed, msg in checks:
+        if failed:
+            _fail(msg)
+
+
+def _run_backend(
+    method: MethodName,
+    x_train: torch.Tensor,
+    k: int,
+    niter: int,
+    seed: int,
+    dev: torch.device,
+    *,
+    batch_size: int,
+    reassignment_ratio: float,
+    flash_warmup_runs: int,
+    flash_timed_repeats: int,
+) -> dict:
+    if method == FLASHKMEANS:
+        return run_flash_kmeans(
+            x_train,
+            k,
+            niter,
+            seed,
+            dev,
+            warmup_runs=flash_warmup_runs,
+            timed_repeats=flash_timed_repeats,
+        )
+    if method == FASTKMEANS:
+        return run_fast_kmeans(x_train, k, niter, seed, dev)
+    if method == MINIBATCHKMEANS:
+        return run_minibatch_kmeans(
+            x_train,
+            k,
+            niter,
+            seed,
+            dev,
+            batch_size=batch_size,
+            reassignment_ratio=reassignment_ratio,
+        )
+    if method == SKLEARNKMEANS:
+        return run_sklearn_kmeans(x_train, k, niter, seed, dev)
+    if method == SKLEARNMINIBATCHKMEANS:
+        return run_sklearn_minibatch_kmeans(
+            x_train,
+            k,
+            niter,
+            seed,
+            dev,
+            batch_size=batch_size,
+            reassignment_ratio=reassignment_ratio,
+        )
+    if method == FAISSKMEANS:
+        return run_faiss_kmeans(x_train, k, niter, seed, dev)
+    _fail(f"unknown method {method!r}.")
+
+
+def _run_measuring_gpu_memory(
+    dev: torch.device,
+    run: Callable[[], dict],
+    *,
+    record_series: bool,
+    series_interval_s: float,
+) -> tuple[dict, NvitopProcessGpuMemory | None, list[dict[str, float | int]] | None, float | None]:
+    """Run ``run``; on CUDA also sample process GPU memory. Returns (out, stats, series, interval)."""
+    if dev.type != "cuda":
+        out = run()
+        if record_series:
+            print(
+                "evaluation.perf_test: --gpu-memory-series ignored on non-CUDA device.",
+                file=sys.stderr,
+            )
+        return out, None, None, None
+    out, stats, series = nvitop_process_gpu_memory_during(
+        torch_device_index(dev),
+        run,
+        record_series=record_series,
+        series_interval_s=series_interval_s,
+    )
+    return out, stats, series, (series_interval_s if record_series else None)
+
+
+def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    n = args.n
-    k = args.k
-    d = args.d
-    seed = args.seed
-    niter = args.niter
+    _validate_args(args)
+    n, k, d, seed, niter = args.n, args.k, args.d, args.seed, args.niter
     method: MethodName = args.method
-    device = args.device
     eval_quality = args.eval_quality
-    eval_chunk_rows = args.eval_chunk_rows
-    output_path = args.output
-    batch_size = args.batch_size
-    reassignment_ratio = args.reassignment_ratio
-    gpu_memory_series = args.gpu_memory_series
-    gpu_memory_series_interval_s = float(args.gpu_memory_series_interval)
-    flash_pin = not args.no_flash_pin
-    flash_warmup_runs = args.flash_warmup_runs
-    flash_timed_repeats = args.flash_timed_repeats
-    if flash_warmup_runs < 0 or flash_timed_repeats < 1:
-        print(
-            "evaluation.perf_test: --flash-warmup-runs must be >= 0 and "
-            "--flash-timed-repeats must be >= 1.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
 
-    if eval_chunk_rows < 1:
-        print("evaluation.perf_test: --eval-chunk-rows must be >= 1.", file=sys.stderr)
-        sys.exit(1)
-
-    if batch_size < 1:
-        print("evaluation.perf_test: --batch-size must be >= 1.", file=sys.stderr)
-        sys.exit(1)
-
-    if reassignment_ratio < 0:
-        print("evaluation.perf_test: --reassignment-ratio must be >= 0.", file=sys.stderr)
-        sys.exit(1)
-
-    if gpu_memory_series and gpu_memory_series_interval_s <= 0:
-        print(
-            "evaluation.perf_test: --gpu-memory-series-interval must be > 0.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    dev = torch.device(device)
+    dev = torch.device(args.device)
     if dev.type == "cuda" and not torch.cuda.is_available():
-        print(
-            "evaluation.perf_test: --device requests CUDA but torch.cuda.is_available() is False.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        _fail("--device requests CUDA but torch.cuda.is_available() is False.")
 
     print("Generating Gaussian mixture data...")
     x_cpu, y_true = gaussian_mixture(n, k, d, seed=seed)
@@ -306,97 +367,50 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 - existing debt, 
             x_cpu, y_true, train_fraction=_TRAIN_FRACTION, seed=seed
         )
     except ValueError as e:
-        print(f"evaluation.perf_test: {e}", file=sys.stderr)
-        sys.exit(1)
+        _fail(str(e))
 
     del x_cpu
     n_train = int(x_train.shape[0])
     if n_train < k:
-        print(
-            f"evaluation.perf_test: need n_train >= k for initialization; got n_train={n_train}, k={k}. "
-            "Increase --n.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        _fail(f"need n_train >= k for initialization; got n_train={n_train}, k={k}. Increase --n.")
 
     if eval_quality and (x_val is None or int(x_val.shape[0]) < 1):
-        print("evaluation.perf_test: val split is empty; cannot compute quality.", file=sys.stderr)
-        sys.exit(1)
+        _fail("val split is empty; cannot compute quality.")
 
     if (
-        flash_pin
+        not args.no_flash_pin
         and method == FLASHKMEANS
         and dev.type == "cuda"
         and x_train.device.type == "cpu"
         and not x_train.is_pinned()
     ):
-        pinned_train = x_train.contiguous().pin_memory()
+        x_train = x_train.contiguous().pin_memory()
         if not eval_quality:
             x_val = None
             y_val = None
-        x_train = pinned_train
 
     print("Running benchmarks...")
 
-    def _run_backend() -> dict:
-        if method == FLASHKMEANS:
-            return run_flash_kmeans(
-                x_train,
-                k,
-                niter,
-                seed,
-                dev,
-                warmup_runs=flash_warmup_runs,
-                timed_repeats=flash_timed_repeats,
-            )
-        if method == FASTKMEANS:
-            return run_fast_kmeans(x_train, k, niter, seed, dev)
-        if method == MINIBATCHKMEANS:
-            return run_minibatch_kmeans(
-                x_train,
-                k,
-                niter,
-                seed,
-                dev,
-                batch_size=batch_size,
-                reassignment_ratio=reassignment_ratio,
-            )
-        if method == SKLEARNKMEANS:
-            return run_sklearn_kmeans(x_train, k, niter, seed, dev)
-        if method == SKLEARNMINIBATCHKMEANS:
-            return run_sklearn_minibatch_kmeans(
-                x_train,
-                k,
-                niter,
-                seed,
-                dev,
-                batch_size=batch_size,
-                reassignment_ratio=reassignment_ratio,
-            )
-        if method == FAISSKMEANS:
-            return run_faiss_kmeans(x_train, k, niter, seed, dev)
-        print(f"evaluation.perf_test: unknown method {method!r}.", file=sys.stderr)
-        sys.exit(1)
-
-    nvitop_stats: NvitopProcessGpuMemory | None = None
-    nvitop_series: list[dict[str, float | int]] | None = None
-    series_interval_out: float | None = None
-    if dev.type == "cuda":
-        out, nvitop_stats, nvitop_series = nvitop_process_gpu_memory_during(
-            torch_device_index(dev),
-            _run_backend,
-            record_series=gpu_memory_series,
-            series_interval_s=gpu_memory_series_interval_s,
+    def run() -> dict:
+        return _run_backend(
+            method,
+            x_train,
+            k,
+            niter,
+            seed,
+            dev,
+            batch_size=args.batch_size,
+            reassignment_ratio=args.reassignment_ratio,
+            flash_warmup_runs=args.flash_warmup_runs,
+            flash_timed_repeats=args.flash_timed_repeats,
         )
-        if gpu_memory_series:
-            series_interval_out = gpu_memory_series_interval_s
-    else:
-        out = _run_backend()
-        if gpu_memory_series:
-            print(
-                "evaluation.perf_test: --gpu-memory-series ignored on non-CUDA device.",
-                file=sys.stderr,
-            )
+
+    out, nvitop_stats, nvitop_series, series_interval_out = _run_measuring_gpu_memory(
+        dev,
+        run,
+        record_series=args.gpu_memory_series,
+        series_interval_s=float(args.gpu_memory_series_interval),
+    )
 
     row = _benchmark_row(
         method,
@@ -412,7 +426,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 - existing debt, 
         niter=niter,
         eval_quality=eval_quality,
         eval_device=dev,
-        eval_chunk_rows=eval_chunk_rows,
+        eval_chunk_rows=args.eval_chunk_rows,
         x_train=x_train,
         y_train=y_train,
         x_val=x_val,
@@ -420,8 +434,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 - existing debt, 
     )
     rows = [row] if row is not None else []
 
-    if output_path is not None:
-        with open(output_path, "w", encoding="utf-8") as f:
+    if args.output is not None:
+        with open(args.output, "w", encoding="utf-8") as f:
             json.dump(rows, f, indent=2)
 
     for r in rows:
