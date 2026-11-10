@@ -298,6 +298,7 @@ class MiniBatchKMeans:
             return labels, inertia
 
     def _check_input(self, X: torch.Tensor, predict: bool = False) -> None:
+        """Validate ``X``; once fitted, its column count must match the centers."""
         if X.dim() != 2:
             raise ValueError("Input tensor must be 2D.")
         if X.layout is not torch.strided:
@@ -308,7 +309,7 @@ class MiniBatchKMeans:
             raise ValueError(f"Input tensor dtype {X.dtype} must match model dtype {self.dtype}.")
         if predict and self._cluster_centers is None:
             raise ValueError("Model has not been fitted yet.")
-        if predict and X.shape[1] != self._cluster_centers.shape[1]:
+        if self._cluster_centers is not None and X.shape[1] != self._cluster_centers.shape[1]:
             raise ValueError(
                 f"Input tensor dim {X.shape[1]} must match cluster centers dim {self._cluster_centers.shape[1]}."
             )
@@ -542,6 +543,8 @@ class MiniBatchKMeans:
             raise ValueError("batch_size must be >= 1.")
         if max_iter < 1:
             raise ValueError("max_iter must be >= 1.")
+        # fit() trains from scratch: drop old centers so a new feature width is allowed.
+        self._cluster_centers = None
         self._check_input(X)
         need_batch_inertia = self.verbose or (max_no_improvement is not None)
         device = self.device
