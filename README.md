@@ -43,7 +43,7 @@ km = MiniBatchKMeans(n_clusters=8, random_state=torch.Generator().manual_seed(42
 km.fit(X, batch_size=256, max_iter=20)
 labels = km.predict(X)
 
-print(labels.shape)              # torch.Size([5000])
+print(labels.shape)  # torch.Size([5000])
 print(km.cluster_centers.shape)  # torch.Size([8, 4])
 ```
 
@@ -76,7 +76,7 @@ The notebook [notebooks/partial_fit_demo.ipynb](notebooks/partial_fit_demo.ipynb
 ```python
 km.save("kmeans.pt")
 
-km2 = MiniBatchKMeans.load("kmeans.pt")                                  # loads on CPU
+km2 = MiniBatchKMeans.load("kmeans.pt")  # loads on CPU
 km_gpu = MiniBatchKMeans.load("kmeans.pt", device=torch.device("cuda"))  # loads on a GPU
 ```
 

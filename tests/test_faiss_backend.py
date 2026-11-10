@@ -29,9 +29,7 @@ class TestFaissBackend(unittest.TestCase):
         self.x = torch.randn(self.n, self.d, dtype=torch.float32)
 
     def test_faiss_kmeans_shape_and_finite(self) -> None:
-        out = run_faiss_kmeans(
-            self.x, self.k, self.niter, self.seed, self.device
-        )
+        out = run_faiss_kmeans(self.x, self.k, self.niter, self.seed, self.device)
         c = out["centroids"]
         self.assertEqual(c.shape, (self.k, self.d))
         self.assertTrue(torch.isfinite(c).all())

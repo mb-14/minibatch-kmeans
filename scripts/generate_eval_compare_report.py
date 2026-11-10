@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from evaluation.compare_runs import load_eval_rollup
@@ -14,7 +15,7 @@ except ImportError:
 
 
 def _fmt_pm(mean: float | None, std: float | None) -> str:
-    if mean is None or mean != mean:
+    if mean is None or math.isnan(mean):
         return "—"
     if std is None or std == 0.0:
         return f"{mean:.4f}"
@@ -22,7 +23,7 @@ def _fmt_pm(mean: float | None, std: float | None) -> str:
 
 
 def _fmt_d(mean: float, std: float | None) -> str:
-    if mean is None or mean != mean:
+    if mean is None or math.isnan(mean):
         return "—"
     if std is None or std == 0.0:
         return f"{mean:+.4f}"
@@ -59,7 +60,7 @@ def main() -> None:
         try:
             _write_compare_figures(reports)
             figure_lines = _figure_markdown()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - figures are optional; report still renders
             print(f"generate_eval_compare_report: figures skipped ({e})", flush=True)
 
     lines: list[str] = []
@@ -72,7 +73,9 @@ def main() -> None:
     lines.append("|---------|-------|")
     lines.append("| Backends | `fastkmeans`, `minibatchkmeans` |")
     lines.append("| Iterations | `evaluation.heuristics.scaled_niter(n)` (per dataset) |")
-    lines.append("| Trials | See JSON `n_trials` / `by_seed` (`--n-trials N`, seeds `seed`..`seed+N-1`) |")
+    lines.append(
+        "| Trials | See JSON `n_trials` / `by_seed` (`--n-trials N`, seeds `seed`..`seed+N-1`) |"
+    )
     lines.append("| Data | `--data-path ./clustering-data-v1` |")
     lines.append(
         "| Minibatch batch size | `--batch-size` (default 16384; capped at `n` per dataset) |"
@@ -106,9 +109,7 @@ def main() -> None:
         f"ARI wins — fast **{w['ari_fast']}**, minibatch **{w['ari_mb']}**, tie **{w['ari_tie']}**. "
         f"NMI wins — fast **{w['nmi_fast']}**, minibatch **{w['nmi_mb']}**, tie **{w['nmi_tie']}**.\n"
     )
-    lines.append(
-        "| Dataset | ARI fast | ARI mb | ΔARI | NMI fast | NMI mb | ΔNMI |"
-    )
+    lines.append("| Dataset | ARI fast | ARI mb | ΔARI | NMI fast | NMI mb | ΔNMI |")
     lines.append("|---------|----------|--------|------|----------|--------|------|")
     for c in comp:
         af = _fmt_pm(c["ari_fast"], c.get("ari_fast_std"))
@@ -117,9 +118,7 @@ def main() -> None:
         nm = _fmt_pm(c["nmi_mb"], c.get("nmi_mb_std"))
         d1 = _fmt_d(c["dari"], c.get("dari_std"))
         d2 = _fmt_d(c["dnmi"], c.get("dnmi_std"))
-        lines.append(
-            f"| {c['task']} | {af} | {am} | {d1} | {nf} | {nm} | {d2} |"
-        )
+        lines.append(f"| {c['task']} | {af} | {am} | {d1} | {nf} | {nm} | {d2} |")
     lines.append("")
 
     out = reports / "eval_compare_fast_minibatch.md"

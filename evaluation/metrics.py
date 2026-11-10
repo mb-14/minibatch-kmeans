@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -38,10 +38,7 @@ def wcss_torch(
     """
     if chunk_rows < 1:
         raise ValueError("chunk_rows must be >= 1")
-    if eval_device is None:
-        dev = x.device
-    else:
-        dev = _as_device(eval_device)
+    dev = x.device if eval_device is None else _as_device(eval_device)
 
     n = x.shape[0]
 
@@ -74,10 +71,7 @@ def assign_labels_torch(
     """Nearest-centroid labels (same distance definition as ``wcss_torch``), chunked over rows."""
     if chunk_rows < 1:
         raise ValueError("chunk_rows must be >= 1")
-    if eval_device is None:
-        dev = x.device
-    else:
-        dev = _as_device(eval_device)
+    dev = x.device if eval_device is None else _as_device(eval_device)
 
     n = x.shape[0]
 
@@ -113,10 +107,7 @@ def wcss_and_assign_labels_torch(
     """
     if chunk_rows < 1:
         raise ValueError("chunk_rows must be >= 1")
-    if eval_device is None:
-        dev = x.device
-    else:
-        dev = _as_device(eval_device)
+    dev = x.device if eval_device is None else _as_device(eval_device)
 
     n = x.shape[0]
 
@@ -180,9 +171,7 @@ def _labels_for_clustbench_get_score(y_pred: np.ndarray, k: int) -> np.ndarray:
         return y
     if lo >= 0 and hi <= k - 1:
         return y + 1
-    raise ValueError(
-        f"Cannot map partition to clustbench 1..k labels: min={lo}, max={hi}, k={k}"
-    )
+    raise ValueError(f"Cannot map partition to clustbench 1..k labels: min={lo}, max={hi}, k={k}")
 
 
 def _metric_ari_numpy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -190,9 +179,7 @@ def _metric_ari_numpy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 
 def _metric_nmi_numpy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    return float(
-        normalized_mutual_info_score(y_true, y_pred, average_method="arithmetic")
-    )
+    return float(normalized_mutual_info_score(y_true, y_pred, average_method="arithmetic"))
 
 
 def clustbench_best_score(
@@ -229,10 +216,6 @@ def clustbench_best_ari_and_nmi(
     k: int,
 ) -> tuple[float, float]:
     """ARI and NMI each maximized over references (same ``y_pred``; two separate ``get_score`` calls)."""
-    ari = clustbench_best_score(
-        reference_labels, y_pred, k, metric=_metric_ari_numpy
-    )
-    nmi = clustbench_best_score(
-        reference_labels, y_pred, k, metric=_metric_nmi_numpy
-    )
+    ari = clustbench_best_score(reference_labels, y_pred, k, metric=_metric_ari_numpy)
+    nmi = clustbench_best_score(reference_labels, y_pred, k, metric=_metric_nmi_numpy)
     return ari, nmi

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -42,7 +43,9 @@ def plot_perf_compare(rows: list[Mapping[str, Any]], out_path: Path, *, dpi: int
     by_m = _by_method(rows)
     methods = [m for m in METHOD_ORDER if m in by_m]
     if not methods:
-        raise ValueError("No recognized methods in JSON (expected faisskmeans / fastkmeans / minibatchkmeans).")
+        raise ValueError(
+            "No recognized methods in JSON (expected faisskmeans / fastkmeans / minibatchkmeans)."
+        )
     labels = [METHOD_LABELS.get(m, m) for m in methods]
     x = np.arange(len(methods))
     colors = plt.cm.Set2(np.linspace(0, 1, len(methods)))
@@ -87,7 +90,14 @@ def plot_perf_compare(rows: list[Mapping[str, Any]], out_path: Path, *, dpi: int
                 )
     else:
         ax_m.bar(x, [0] * len(methods), color=colors)
-        ax_m.text(0.5, 0.5, "No GPU nvitop memory fields", ha="center", va="center", transform=ax_m.transAxes)
+        ax_m.text(
+            0.5,
+            0.5,
+            "No GPU nvitop memory fields",
+            ha="center",
+            va="center",
+            transform=ax_m.transAxes,
+        )
     ax_m.set_xticks(x)
     ax_m.set_xticklabels(labels, rotation=15, ha="right")
     if mem_is_peak:

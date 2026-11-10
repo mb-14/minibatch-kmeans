@@ -85,9 +85,7 @@ def run_faiss_kmeans(
         iters_done = int(clus.iteration_stats.size())
         return centers, iters_done
 
-    (centers_np, iters_done), elapsed, cpu_s = run_timed_nvtx(
-        device, "faiss_kmeans:train", _fit
-    )
+    (centers_np, iters_done), elapsed, cpu_s = run_timed_nvtx(device, "faiss_kmeans:train", _fit)
 
     centers = torch.tensor(centers_np, dtype=torch.float32, device=device)
 

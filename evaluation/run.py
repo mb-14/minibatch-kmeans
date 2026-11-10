@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 from typing import Any
@@ -11,29 +12,31 @@ from typing import Any
 import numpy as np
 import torch
 
+from evaluation.backends.faiss_backend import run_faiss_kmeans
 from evaluation.backends.fast_kmeans import run_fast_kmeans
 from evaluation.backends.flash_kmeans import run_flash_kmeans
+from evaluation.backends.methods import (
+    FAISSKMEANS,
+    FASTKMEANS,
+    FLASHKMEANS,
+    MINIBATCHKMEANS,
+    SKLEARNKMEANS,
+    SKLEARNMINIBATCHKMEANS,
+    VALID_METHODS,
+    MethodName,
+)
 from evaluation.backends.minibatch_kmeans import run_minibatch_kmeans
-from evaluation.backends.faiss_backend import run_faiss_kmeans
 from evaluation.backends.sklearn_backend import (
     run_sklearn_kmeans,
     run_sklearn_minibatch_kmeans,
 )
-from evaluation.metrics import assign_labels_torch, clustbench_best_ari_and_nmi
-from evaluation.datasets import load_clustbench_dataset
+from evaluation.cli import fail, non_negative_float, positive_int, require_clustbench
+from evaluation.datasets import LoadedBenchmark, load_clustbench_dataset_or_skip
 from evaluation.heuristics import scaled_niter
+from evaluation.metrics import assign_labels_torch, clustbench_best_ari_and_nmi
 from evaluation.presets import BENCHMARK_TASKS
-import clustbench
-from evaluation.backends.methods import (
-    FASTKMEANS,
-    FAISSKMEANS,
-    FLASHKMEANS,
-    MINIBATCHKMEANS,
-    MethodName,
-    SKLEARNKMEANS,
-    SKLEARNMINIBATCHKMEANS,
-    VALID_METHODS,
-)
+
+PROG = "evaluation.run"
 
 
 def _parse_methods(
@@ -60,13 +63,13 @@ def _parse_methods(
     for m in raw:
         if m == FLASHKMEANS and device.type != "cuda":
             print(
-                "evaluation.run: skipping flashkmeans (requires CUDA device).",
+                f"{PROG}: skipping flashkmeans (requires CUDA device).",
                 file=sys.stderr,
             )
             continue
         out.append(m)  # type: ignore[arg-type]
     if not out:
-        print("evaluation.run: no methods left to run.", file=sys.stderr)
+        print(f"{PROG}: no methods left to run.", file=sys.stderr)
         sys.exit(1)
     return out
 
@@ -129,7 +132,7 @@ def _mean_stdev(values: list[float]) -> tuple[float, float]:
     return m, statistics.stdev(values)
 
 
-def main(argv: list[str] | None = None) -> None:
+def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Evaluate k-means backends on benchmark datasets (best ARI/NMI over references).",
     )
@@ -159,28 +162,28 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.add_argument(
         "--n-trials",
-        type=int,
+        type=positive_int,
         default=1,
         metavar="N",
         help="Number of independent runs (seeds seed..seed+N-1). Mean ± sample stdev on best ARI/NMI.",
     )
     p.add_argument(
         "--reassignment-ratio",
-        type=float,
+        type=non_negative_float,
         default=0.1,
         metavar="R",
         help="reassignment_ratio for minibatchkmeans and sklearnminibatchkmeans (default: 0.1).",
     )
     p.add_argument(
         "--batch-size",
-        type=int,
+        type=positive_int,
         default=16_384,
         metavar="B",
         help="Minibatch size for minibatchkmeans and sklearnminibatchkmeans (default: 16384; capped at n per dataset).",
     )
     p.add_argument(
         "--eval-chunk-rows",
-        type=int,
+        type=positive_int,
         default=8192,
         metavar="R",
         help="Row chunk size for assignment to centroids.",
@@ -192,138 +195,140 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Write JSON results to this path.",
     )
-    args = p.parse_args(argv)
+    return p
 
-    if args.eval_chunk_rows < 1:
-        print("evaluation.run: --eval-chunk-rows must be >= 1.", file=sys.stderr)
-        sys.exit(1)
-    if args.reassignment_ratio is not None and args.reassignment_ratio < 0:
-        print("evaluation.run: --reassignment-ratio must be >= 0.", file=sys.stderr)
-        sys.exit(1)
-    if args.batch_size < 1:
-        print("evaluation.run: --batch-size must be >= 1.", file=sys.stderr)
-        sys.exit(1)
-    if args.n_trials < 1:
-        print("evaluation.run: --n-trials must be >= 1.", file=sys.stderr)
-        sys.exit(1)
+
+def _best_score(values: list[float]) -> float | None:
+    """Max ignoring NaN scores; None if there are none."""
+    return max((v for v in values if not math.isnan(v)), default=None)
+
+
+def _scores_over_references(
+    method: MethodName,
+    loaded: LoadedBenchmark,
+    seed: int,
+    niter: int,
+    dev: torch.device,
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    """Fit once per reference partition (its own k) and score against that reference."""
+    x_cpu = loaded.x
+    n = x_cpu.shape[0]
+    per_ref: list[dict[str, Any]] = []
+    for ref_idx, ref in enumerate(loaded.labels):
+        k = int(loaded.n_clusters[ref_idx])
+        if k < 1 or n < k:
+            print(f"  skip ref {ref_idx}: invalid k={k} or n={n}", file=sys.stderr)
+            continue
+        torch.manual_seed(seed)
+        if dev.type == "cuda":
+            torch.cuda.manual_seed_all(seed)
+
+        try:
+            centroids = _fit_centroids(
+                method,
+                x_cpu,
+                k,
+                niter,
+                seed,
+                dev,
+                batch_size=args.batch_size,
+                reassignment_ratio=args.reassignment_ratio,
+            )
+        except Exception as e:  # noqa: BLE001 - one failed backend run must not abort the batch
+            print(f"  {method} seed {seed} ref {ref_idx} (k={k}) failed: {e}", file=sys.stderr)
+            continue
+
+        pred = assign_labels_torch(
+            x_cpu,
+            centroids,
+            chunk_rows=args.eval_chunk_rows,
+            eval_device=dev if x_cpu.device != dev else None,
+        )
+        y_np = pred.cpu().numpy().astype(np.int64)
+        ari, nmi = clustbench_best_ari_and_nmi([ref], y_np, k)
+        per_ref.append({"ref_index": ref_idx, "k": k, "ari": ari, "nmi": nmi})
+    return per_ref
+
+
+def _method_row(
+    battery: str,
+    dataset: str,
+    method: MethodName,
+    loaded: LoadedBenchmark,
+    seeds: list[int],
+    dev: torch.device,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Result row for one (dataset, method): best ARI/NMI per seed, then mean ± stdev."""
+    n, d = loaded.x.shape
+    niter = scaled_niter(n)
+    by_seed: list[dict[str, Any]] = []
+    per_ref: list[dict[str, Any]] = []
+    for seed in seeds:
+        per_ref = _scores_over_references(method, loaded, seed, niter, dev, args)
+        by_seed.append(
+            {
+                "seed": seed,
+                "best_ari": _best_score([r["ari"] for r in per_ref]),
+                "best_nmi": _best_score([r["nmi"] for r in per_ref]),
+            }
+        )
+
+    ari_vals = [float(x["best_ari"]) for x in by_seed if x["best_ari"] is not None]
+    nmi_vals = [float(x["best_nmi"]) for x in by_seed if x["best_nmi"] is not None]
+    ari_mean, ari_std = _mean_stdev(ari_vals)
+    nmi_mean, nmi_std = _mean_stdev(nmi_vals)
+
+    row: dict[str, Any] = {
+        "battery": battery,
+        "dataset": dataset,
+        "n": n,
+        "d": d,
+        "method": method,
+        "niter": niter,
+        "device": str(dev),
+        "n_trials": args.n_trials,
+        "seeds": seeds,
+        "best_ari": ari_mean if ari_vals else None,
+        "best_nmi": nmi_mean if nmi_vals else None,
+        "best_ari_std": ari_std if ari_vals else None,
+        "best_nmi_std": nmi_std if nmi_vals else None,
+        "by_seed": by_seed,
+        # Per-reference detail is only meaningful for a single seed.
+        "references": per_ref if len(seeds) == 1 else [],
+    }
+    if method in (MINIBATCHKMEANS, SKLEARNMINIBATCHKMEANS):
+        row["batch_size"] = int(min(n, args.batch_size))
+    return row
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _build_parser().parse_args(argv)
+    require_clustbench(PROG)
 
     dev = torch.device(args.device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
     methods = _parse_methods(args.methods, device=dev)
-    seeds_list: list[int] = [args.seed + i for i in range(args.n_trials)]
-
-    tasks = list(BENCHMARK_TASKS)
+    seeds: list[int] = [args.seed + i for i in range(args.n_trials)]
 
     rows: list[dict[str, Any]] = []
-
-    for battery, dataset in tasks:
+    n_loaded = 0
+    for battery, dataset in BENCHMARK_TASKS:
         print(f"Loading {battery}/{dataset}...", flush=True)
-        try:
-            loaded = load_clustbench_dataset(
-                battery,
-                dataset,
-                path=args.data_path,
-            )
-        except Exception as e:
-            print(f"evaluation.run: failed to load {battery}/{dataset}: {e}", file=sys.stderr)
+        loaded = load_clustbench_dataset_or_skip(battery, dataset, path=args.data_path, prog=PROG)
+        if loaded is None:
             continue
+        n_loaded += 1
+        rows.extend(
+            _method_row(battery, dataset, method, loaded, seeds, dev, args) for method in methods
+        )
 
-        x_cpu = loaded.x
-        n, d = x_cpu.shape
-        ref_labels = loaded.labels
-        n_clusters = loaded.n_clusters
-        niter_ds = scaled_niter(n)
-
-        for method in methods:
-            by_seed: list[dict[str, Any]] = []
-            references_single: list[dict[str, Any]] = []
-            for seed in seeds_list:
-                best_ari = float("-inf")
-                best_nmi = float("-inf")
-                per_ref: list[dict[str, Any]] = []
-                for ref_idx in range(len(ref_labels)):
-                    k = int(n_clusters[ref_idx])
-                    if k < 1 or n < k:
-                        print(
-                            f"  skip ref {ref_idx}: invalid k={k} or n={n}",
-                            file=sys.stderr,
-                        )
-                        continue
-                    torch.manual_seed(seed)
-                    if dev.type == "cuda":
-                        torch.cuda.manual_seed_all(seed)
-
-                    try:
-                        centroids = _fit_centroids(
-                            method,
-                            x_cpu,
-                            k,
-                            niter_ds,
-                            seed,
-                            dev,
-                            batch_size=args.batch_size,
-                            reassignment_ratio=args.reassignment_ratio,
-                        )
-                    except Exception as e:
-                        print(
-                            f"  {method} seed {seed} ref {ref_idx} (k={k}) failed: {e}",
-                            file=sys.stderr,
-                        )
-                        continue
-
-                    pred = assign_labels_torch(
-                        x_cpu,
-                        centroids,
-                        chunk_rows=args.eval_chunk_rows,
-                        eval_device=dev if x_cpu.device != dev else None,
-                    )
-                    y_np = pred.cpu().numpy().astype(np.int64)
-
-                    ari, nmi = clustbench_best_ari_and_nmi([ref_labels[ref_idx]], y_np, k)
-                    best_ari = max(best_ari, ari)
-                    best_nmi = max(best_nmi, nmi)
-                    ref_row: dict[str, Any] = {
-                        "ref_index": ref_idx,
-                        "k": k,
-                        "ari": ari,
-                        "nmi": nmi,
-                    }
-                    per_ref.append(ref_row)
-
-                by_seed.append(
-                    {
-                        "seed": seed,
-                        "best_ari": (best_ari if per_ref and best_ari > float("-inf") else None),
-                        "best_nmi": (best_nmi if per_ref and best_nmi > float("-inf") else None),
-                    }
-                )
-                if len(seeds_list) == 1:
-                    references_single = per_ref
-
-            ari_vals = [x["best_ari"] for x in by_seed if x["best_ari"] is not None]
-            nmi_vals = [x["best_nmi"] for x in by_seed if x["best_nmi"] is not None]
-            ari_mean, ari_std = _mean_stdev([float(v) for v in ari_vals])
-            nmi_mean, nmi_std = _mean_stdev([float(v) for v in nmi_vals])
-
-            row: dict[str, Any] = {
-                "battery": battery,
-                "dataset": dataset,
-                "n": n,
-                "d": d,
-                "method": method,
-                "niter": niter_ds,
-                "device": str(dev),
-                "n_trials": args.n_trials,
-                "seeds": seeds_list,
-                "best_ari": ari_mean if ari_vals else None,
-                "best_nmi": nmi_mean if nmi_vals else None,
-                "best_ari_std": ari_std if ari_vals else None,
-                "best_nmi_std": nmi_std if nmi_vals else None,
-                "by_seed": by_seed,
-                "references": references_single if len(seeds_list) == 1 else [],
-            }
-            if method in (MINIBATCHKMEANS, SKLEARNMINIBATCHKMEANS):
-                row["batch_size"] = int(min(n, args.batch_size))
-            rows.append(row)
+    if n_loaded == 0:
+        fail(
+            PROG,
+            f"none of the {len(BENCHMARK_TASKS)} datasets could be loaded from "
+            f"--data-path {args.data_path!r}; check the path.",
+        )
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:

@@ -55,9 +55,7 @@ class TestWcss(unittest.TestCase):
             for ch in (7, 64):
                 w_sep = wcss_torch(x, c, chunk_rows=ch, eval_device=d)
                 a_sep = assign_labels_torch(x, c, chunk_rows=ch, eval_device=d)
-                w_both, a_both = wcss_and_assign_labels_torch(
-                    x, c, chunk_rows=ch, eval_device=d
-                )
+                w_both, a_both = wcss_and_assign_labels_torch(x, c, chunk_rows=ch, eval_device=d)
                 self.assertAlmostEqual(w_both, w_sep, places=4)
                 self.assertTrue(torch.equal(a_both.cpu(), a_sep.cpu()))
 

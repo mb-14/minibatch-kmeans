@@ -58,13 +58,17 @@ class TestPrefetch(unittest.TestCase):
             orig_close(self)
             close_times.append(time.perf_counter() - t0)
 
-        with mock.patch.object(core._BatchPrefetcher, "next", counting_next), \
-                mock.patch.object(core._BatchPrefetcher, "close", timed_close):
+        with (
+            mock.patch.object(core._BatchPrefetcher, "next", counting_next),
+            mock.patch.object(core._BatchPrefetcher, "close", timed_close),
+        ):
             # The convergence check skips step 1, so a huge tol stops at step 2.
             self._fit(X, tol=1e9)
 
         n_steps = (5 * 20_000) // 512
-        self.assertEqual(len(steps), 2, f"expected an early stop, ran {len(steps)} of {n_steps} steps")
+        self.assertEqual(
+            len(steps), 2, f"expected an early stop, ran {len(steps)} of {n_steps} steps"
+        )
         self.assertNotIn("minibatch-kmeans-prefetch", self._thread_names())
         # The worker is parked waiting for a free slot; close() must wake it,
         # not wait for a polling timeout.
@@ -74,12 +78,14 @@ class TestPrefetch(unittest.TestCase):
         torch.manual_seed(0)
         X = torch.randn(20_000, 32)
 
-        def broken_index_select(*args, **kwargs):
+        def broken_index_select(*_args, **_kwargs):
             raise RuntimeError("gather failed")
 
-        with mock.patch.object(core.torch, "index_select", broken_index_select):
-            with self.assertRaisesRegex(RuntimeError, "gather failed"):
-                self._fit(X, max_no_improvement=None)
+        with (
+            mock.patch.object(core.torch, "index_select", broken_index_select),
+            self.assertRaisesRegex(RuntimeError, "gather failed"),
+        ):
+            self._fit(X, max_no_improvement=None)
         self.assertNotIn("minibatch-kmeans-prefetch", self._thread_names())
 
 

@@ -160,9 +160,7 @@ def plot_delta_vs_rho_by_log_n_bins(
         means: list[float] = []
         for rho in rhos:
             chunk = [
-                a
-                for a in agg
-                if float(a["rho"]) == rho and _bin_log_n(int(a["n"]), edges) == bi
+                a for a in agg if float(a["rho"]) == rho and _bin_log_n(int(a["n"]), edges) == bi
             ]
             if chunk:
                 means.append(statistics.mean(a["mean_delta_ari"] for a in chunk))
@@ -213,9 +211,7 @@ def plot_delta_vs_rho_by_k_bins(
     for bi in range(3):
         means: list[float] = []
         for rho in rhos:
-            chunk = [
-                a for a in agg if float(a["rho"]) == rho and bin_k(int(a["k"])) == bi
-            ]
+            chunk = [a for a in agg if float(a["rho"]) == rho and bin_k(int(a["k"])) == bi]
             if chunk:
                 means.append(statistics.mean(a["mean_delta_ari"] for a in chunk))
             else:
@@ -248,7 +244,7 @@ def plot_improvement_rho01_minus_rho0_vs_log_n(
     xs: list[float] = []
     ys: list[float] = []
     cs: list[int] = []
-    for key, m in by_cfg.items():
+    for m in by_cfg.values():
         if 0.0 not in m or 0.1 not in m:
             continue
         a0, a1 = m[0.0], m[0.1]
@@ -273,7 +269,7 @@ def plot_improvement_rho01_minus_rho0_vs_log_n(
         transform=ax.transAxes,
         va="top",
         fontsize=9,
-        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+        bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.5},
     )
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
@@ -293,7 +289,18 @@ def plot_scatter_n_k_color_delta_rho(
     sizes = [40 + 25 * math.log10(max(int(a["d"]), 2)) for a in chunk]
 
     fig, ax = plt.subplots(figsize=(8.5, 5.5))
-    sc = ax.scatter(xs, ys, c=col, cmap="RdBu", vmin=-0.12, vmax=0.12, s=sizes, alpha=0.9, edgecolors="k", linewidths=0.35)
+    sc = ax.scatter(
+        xs,
+        ys,
+        c=col,
+        cmap="RdBu",
+        vmin=-0.12,
+        vmax=0.12,
+        s=sizes,
+        alpha=0.9,
+        edgecolors="k",
+        linewidths=0.35,
+    )
     ax.set_xlabel("log₁₀(n)")
     ax.set_ylabel("k")
     ax.set_title(f"ΔARI vs (n, k) at ρ = {rho} (size ∝ log₁₀d)")
@@ -318,13 +325,12 @@ def plot_best_rho_scatter(
     xs: list[float] = []
     ys: list[float] = []
     best_rhos: list[float] = []
-    for key, rows_c in by_cfg.items():
+    for rows_c in by_cfg.values():
         by_rho: dict[float, list[dict[str, Any]]] = defaultdict(list)
         for a in rows_c:
             by_rho[float(a["rho"])].append(a)
         rho_means = {
-            rho: statistics.mean(x["mean_mb_ari"] for x in lst)
-            for rho, lst in by_rho.items()
+            rho: statistics.mean(x["mean_mb_ari"] for x in lst) for rho, lst in by_rho.items()
         }
         if not rho_means:
             continue
@@ -345,7 +351,18 @@ def plot_best_rho_scatter(
         return 0
 
     idx = [_rho_index(r) for r in best_rhos]
-    sc = ax.scatter(xs, ys, c=idx, cmap="plasma", vmin=0, vmax=len(rhos_sorted) - 1, s=70, alpha=0.9, edgecolors="k", linewidths=0.35)
+    sc = ax.scatter(
+        xs,
+        ys,
+        c=idx,
+        cmap="plasma",
+        vmin=0,
+        vmax=len(rhos_sorted) - 1,
+        s=70,
+        alpha=0.9,
+        edgecolors="k",
+        linewidths=0.35,
+    )
     ax.set_xlabel("log₁₀(n)")
     ax.set_ylabel("k")
     ax.set_title("ρ with highest mean minibatch ARI (per dataset ref)")
@@ -360,7 +377,6 @@ def plot_best_rho_scatter(
 
 def compute_insights_text(
     agg: list[dict[str, Any]],
-    rows: list[dict[str, Any]],
 ) -> str:
     """Pearson correlations on 28 config means at ρ=0.1."""
     a01 = [a for a in agg if abs(float(a["rho"]) - 0.1) < 1e-12]
@@ -443,7 +459,7 @@ def main(argv: list[str] | None = None) -> None:
     plot_scatter_n_k_color_delta_rho(agg, 0.1, out / "scatter_log10n_k_delta_ari_rho0.1.png")
     plot_best_rho_scatter(agg, out / "scatter_log10n_k_best_rho.png")
 
-    insight_body = compute_insights_text(agg, rows)
+    insight_body = compute_insights_text(agg)
     rel = str(out.relative_to(_ROOT))
     md = "\n".join(
         [
@@ -472,7 +488,7 @@ def main(argv: list[str] | None = None) -> None:
             "conda run -n kmeans-bench python scripts/plot_rho_ndim_relationships.py \\",
             f"  -i {args.input.relative_to(_ROOT) if args.input.is_relative_to(_ROOT) else args.input} \\",
             f"  --out-dir {rel} \\",
-            f"  --insights-md reports/rho_ndim_insights.md",
+            "  --insights-md reports/rho_ndim_insights.md",
             "```",
             "",
         ]

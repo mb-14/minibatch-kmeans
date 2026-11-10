@@ -40,8 +40,9 @@ from tqdm import tqdm
 
 from evaluation.backends.fast_kmeans import run_fast_kmeans
 from evaluation.backends.minibatch_kmeans import run_minibatch_kmeans
+from evaluation.cli import fail, positive_int, require_clustbench
 from evaluation.data import gaussian_mixture, gaussian_mixture_imbalanced
-from evaluation.datasets import load_clustbench_dataset
+from evaluation.datasets import load_clustbench_dataset_or_skip, missing_clustbench_data
 from evaluation.heuristics import scaled_niter
 from evaluation.metrics import (
     ari_score,
@@ -52,6 +53,8 @@ from evaluation.metrics import (
 from evaluation.presets import BENCHMARK_TASKS
 
 ScenarioName = Literal["well_separated", "overlapping", "imbalanced"]
+
+PROG = "sweep_reassignment_ratio"
 
 DEFAULT_RHO_GRID = [
     0.0,
@@ -161,8 +164,11 @@ def _load_or_make_sim_data(
                 payload = torch.load(path, map_location="cpu")
                 x = torch.as_tensor(payload["x"], dtype=torch.float32)
                 y_true = torch.as_tensor(payload["y_true"], dtype=torch.int64)
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001 - any unreadable cache entry is just regenerated
+                print(
+                    f"{PROG}: ignoring unreadable cache {path}: {e}",
+                    file=sys.stderr,
+                )
             else:
                 if x.shape == (n, d) and y_true.shape == (n,):
                     return x, y_true
@@ -303,6 +309,10 @@ def run_sim_sweep(
     return rows
 
 
+def _no_datasets_msg(data_path: str) -> str:
+    return f"no clustbench datasets could be loaded from --data-path {data_path!r}; check the path."
+
+
 def run_real_sweep(
     *,
     tasks: list[tuple[str, str]],
@@ -315,6 +325,7 @@ def run_real_sweep(
     progress: bool = True,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    n_loaded = 0
     outer = tqdm(
         tasks,
         desc="real sweep",
@@ -325,18 +336,10 @@ def run_real_sweep(
     try:
         for battery, dataset in outer:
             outer.set_postfix_str(f"{battery}/{dataset}", refresh=False)
-            try:
-                loaded = load_clustbench_dataset(
-                    battery,
-                    dataset,
-                    path=data_path,
-                )
-            except Exception as e:
-                print(
-                    f"sweep_reassignment_ratio: skip {battery}/{dataset}: {e}",
-                    file=sys.stderr,
-                )
+            loaded = load_clustbench_dataset_or_skip(battery, dataset, path=data_path, prog=PROG)
+            if loaded is None:
                 continue
+            n_loaded += 1
 
             x_cpu = loaded.x
             n, d = x_cpu.shape
@@ -410,7 +413,9 @@ def run_real_sweep(
                                     eval_device=device if x_cpu.device != device else None,
                                 )
                                 y_np_m = pred_m.cpu().numpy().astype(np.int64)
-                                ma, mn = clustbench_best_ari_and_nmi([ref_labels[ref_idx]], y_np_m, k)
+                                ma, mn = clustbench_best_ari_and_nmi(
+                                    [ref_labels[ref_idx]], y_np_m, k
+                                )
 
                                 rows.append(
                                     {
@@ -443,6 +448,8 @@ def run_real_sweep(
                 mid.close()
     finally:
         outer.close()
+    if n_loaded == 0:
+        fail(PROG, _no_datasets_msg(data_path))
     return rows
 
 
@@ -451,7 +458,9 @@ def _parse_rho_list(raw: str) -> list[float]:
     return [float(p) for p in parts]
 
 
-def _sim_scenarios_and_grid(args: argparse.Namespace) -> tuple[list[ScenarioName], list[tuple[int, int, int]]]:
+def _sim_scenarios_and_grid(
+    args: argparse.Namespace,
+) -> tuple[list[ScenarioName], list[tuple[int, int, int]]]:
     if args.quick:
         return ["well_separated"], QUICK_SIM_GRID
     if args.sim_grid_json is not None:
@@ -515,19 +524,12 @@ def _print_real_heuristics(
     headers = ["kind", "battery", "dataset", "ref_index", "n", "k", "d", "n_iter", "batch_size"]
     right_align = [False, False, False, True, True, True, True, True, True]
     rows: list[list[object]] = []
+    n_loaded = 0
     for battery, dataset in tasks:
-        try:
-            loaded = load_clustbench_dataset(
-                battery,
-                dataset,
-                path=data_path,
-            )
-        except Exception as e:
-            print(
-                f"sweep_reassignment_ratio: skip {battery}/{dataset}: {e}",
-                file=sys.stderr,
-            )
+        loaded = load_clustbench_dataset_or_skip(battery, dataset, path=data_path, prog=PROG)
+        if loaded is None:
             continue
+        n_loaded += 1
         x_cpu = loaded.x
         n, d = int(x_cpu.shape[0]), int(x_cpu.shape[1])
         n_clusters = loaded.n_clusters
@@ -538,10 +540,12 @@ def _print_real_heuristics(
             ni = scaled_niter(n)
             bs = int(min(n, batch_size))
             rows.append(["real", battery, dataset, ref_idx, n, k, d, ni, bs])
+    if n_loaded == 0:
+        fail(PROG, _no_datasets_msg(data_path))
     _print_aligned_table(headers, rows, right_align=right_align)
 
 
-def main(argv: list[str] | None = None) -> None:
+def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--mode",
@@ -552,14 +556,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--device", type=str, default=None, help="torch device (default: cuda:0 or cpu)")
     p.add_argument(
         "--eval-chunk-rows",
-        type=int,
+        type=positive_int,
         default=8192,
         metavar="R",
         help="Chunk rows for label assignment",
     )
     p.add_argument(
         "--batch-size",
-        type=int,
+        type=positive_int,
         default=16_384,
         metavar="B",
         help="Minibatch batch size for MiniBatchKMeans (default: 16384; capped at n per dataset)",
@@ -580,7 +584,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.add_argument(
         "--n-trials",
-        type=int,
+        type=positive_int,
         default=3,
         metavar="N",
         help="Number of independent runs with seeds seed, seed+1, …, seed+N-1 (default: 5). Ignored if --seeds is set.",
@@ -647,77 +651,63 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Print derived n_iter and batch_size for sim grid and/or real datasets, then exit (no fit/eval).",
     )
-    args = p.parse_args(argv)
+    return p
 
-    if args.mode in ("real", "both") and args.data_path is None:
-        print(
-            "sweep_reassignment_ratio: --data-path is required for --mode real or both.",
-            file=sys.stderr,
+
+def _resolve_seed_list(args: argparse.Namespace) -> list[int]:
+    if args.seeds is not None:
+        out = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
+        if not out:
+            fail(PROG, "--seeds must list at least one integer.")
+        return out
+    n = 2 if args.quick else args.n_trials
+    return [args.seed + i for i in range(n)]
+
+
+def _print_params(args: argparse.Namespace, sim_grid: list[tuple[int, int, int]]) -> None:
+    if args.mode in ("sim", "both"):
+        print("## sim", file=sys.stderr, flush=True)
+        _print_sim_heuristics(grid=sim_grid, batch_size=args.batch_size)
+    if args.mode in ("real", "both"):
+        print("## real", file=sys.stderr, flush=True)
+        _print_real_heuristics(
+            tasks=list(BENCHMARK_TASKS),
+            data_path=args.data_path,
+            batch_size=args.batch_size,
         )
-        sys.exit(1)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _build_parser().parse_args(argv)
+
+    if args.mode in ("real", "both"):
+        # Check up front so `--mode both` doesn't run the whole sim sweep before failing.
+        if args.data_path is None:
+            fail(PROG, "--data-path is required for --mode real or both.")
+        require_clustbench(PROG)
+        if missing_clustbench_data(args.data_path, BENCHMARK_TASKS):
+            fail(PROG, _no_datasets_msg(args.data_path))
 
     scenarios: list[ScenarioName]
     sim_grid: list[tuple[int, int, int]]
     try:
         scenarios, sim_grid = _sim_scenarios_and_grid(args)
     except (OSError, ValueError, json.JSONDecodeError) as e:
-        print(f"sweep_reassignment_ratio: --sim-grid-json: {e}", file=sys.stderr)
-        sys.exit(1)
+        fail(PROG, f"--sim-grid-json: {e}")
 
     if args.print_params:
-        if args.mode in ("sim", "both"):
-            print("## sim", file=sys.stderr, flush=True)
-            _print_sim_heuristics(grid=sim_grid, batch_size=args.batch_size)
-        if args.mode in ("real", "both"):
-            try:
-                import clustbench  # noqa: F401
-            except ImportError:
-                print(
-                    "sweep_reassignment_ratio: clustering-benchmarks required for real mode. "
-                    'pip install -e ".[eval]"',
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            print("## real", file=sys.stderr, flush=True)
-            _print_real_heuristics(
-                tasks=list(BENCHMARK_TASKS),
-                data_path=args.data_path,
-                batch_size=args.batch_size,
-            )
+        _print_params(args, sim_grid)
         return
 
-    if args.eval_chunk_rows < 1:
-        print("sweep_reassignment_ratio: --eval-chunk-rows must be >= 1.", file=sys.stderr)
-        sys.exit(1)
-    if args.n_trials < 1:
-        print("sweep_reassignment_ratio: --n-trials must be >= 1.", file=sys.stderr)
-        sys.exit(1)
-    if args.batch_size < 1:
-        print("sweep_reassignment_ratio: --batch-size must be >= 1.", file=sys.stderr)
-        sys.exit(1)
-
     dev = torch.device(args.device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
-
-    rho_values = _parse_rho_list(args.rho) if args.rho else (QUICK_RHO if args.quick else DEFAULT_RHO_GRID)
-
-    def _resolve_seed_list(*, quick: bool) -> list[int]:
-        if args.seeds is not None:
-            out = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
-            if not out:
-                print("sweep_reassignment_ratio: --seeds must list at least one integer.", file=sys.stderr)
-                sys.exit(1)
-            return out
-        if quick:
-            return [args.seed + i for i in range(2)]
-        return [args.seed + i for i in range(args.n_trials)]
-
-    seed_list = _resolve_seed_list(quick=args.quick)
+    rho_values = (
+        _parse_rho_list(args.rho) if args.rho else (QUICK_RHO if args.quick else DEFAULT_RHO_GRID)
+    )
+    seed_list = _resolve_seed_list(args)
     sim_data_seed = args.data_seed if args.data_seed is not None else args.seed
-
-    all_rows: list[dict[str, Any]] = []
-
     show_progress = not args.no_progress
 
+    all_rows: list[dict[str, Any]] = []
     if args.mode in ("sim", "both"):
         all_rows.extend(
             run_sim_sweep(
@@ -733,21 +723,10 @@ def main(argv: list[str] | None = None) -> None:
                 sim_cache_dir=args.sim_cache_dir,
             )
         )
-
     if args.mode in ("real", "both"):
-        try:
-            import clustbench  # noqa: F401
-        except ImportError:
-            print(
-                "sweep_reassignment_ratio: clustering-benchmarks required for real mode. "
-                'pip install -e ".[eval]"',
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        tasks = list(BENCHMARK_TASKS)
         all_rows.extend(
             run_real_sweep(
-                tasks=tasks,
+                tasks=list(BENCHMARK_TASKS),
                 rho_values=rho_values,
                 seeds=seed_list,
                 device=dev,
