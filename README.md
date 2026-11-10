@@ -47,7 +47,7 @@ print(labels.shape)  # torch.Size([5000])
 print(km.cluster_centers.shape)  # torch.Size([8, 4])
 ```
 
-`fit` returns the centers, and `predict` returns one label per row. `fit_predict` does both steps in one call. The input dtype must match the model's `dtype`, which is `torch.float32` by default. Pass a seeded CPU `torch.Generator` as `random_state` when you need the same result on every run.
+`fit` returns the centers, and `predict` returns one label per row. `fit_predict` does both steps in one call. The input dtype must match the model's `dtype`, which is `torch.float32` by default. Only `torch.float32` and `torch.float64` are supported; convert half-precision data with `X.float()`. Pass a seeded CPU `torch.Generator` as `random_state` when you need the same result on every run.
 
 ### Run on a GPU
 
