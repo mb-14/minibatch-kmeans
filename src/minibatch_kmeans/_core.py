@@ -38,13 +38,18 @@ class _ConvergenceState:
             alpha = min(batch_size * 2.0 / (n_samples + 1), 1.0)
             self.ewa = self.ewa * (1 - alpha) + mean_inertia * alpha
 
-    def stalled(self, max_no_improvement: int | None) -> bool:
-        """Track the best EWA seen; True once it fails to improve ``max_no_improvement`` times."""
+    def record_improvement(self) -> None:
+        """Compare the current EWA with the best so far and update the no-improvement count."""
+        if self.ewa is None:
+            raise RuntimeError("record_improvement() called before update_ewa()")
         if self.ewa_min is None or self.ewa < self.ewa_min:
             self.no_improvement = 0
             self.ewa_min = self.ewa
         else:
             self.no_improvement += 1
+
+    def is_stalled(self, max_no_improvement: int | None) -> bool:
+        """True once the EWA has failed to improve ``max_no_improvement`` times in a row."""
         return max_no_improvement is not None and self.no_improvement >= max_no_improvement
 
 
@@ -359,7 +364,10 @@ class MiniBatchKMeans:
                     print(f"Converged (small centers change) at step {step}/{n_steps}")
                 return True
 
-            if mean_inertia is not None and inertia_convergence.stalled(max_no_improvement):
+            if mean_inertia is None:
+                return False
+            inertia_convergence.record_improvement()
+            if inertia_convergence.is_stalled(max_no_improvement):
                 if self.verbose:
                     print(f"Converged (lack of improvement in inertia) at step {step}/{n_steps}")
                 return True

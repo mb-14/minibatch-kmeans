@@ -35,35 +35,46 @@ class TestConvergenceState(unittest.TestCase):
         state.update_ewa(2.0, batch_size=500, n_samples=10)
         self.assertEqual(state.ewa, 2.0)
 
-    def test_stalled_counts_non_improvements(self) -> None:
+    def _record(self, state: _ConvergenceState, ewa: float) -> None:
+        state.ewa = ewa
+        state.record_improvement()
+
+    def test_counts_non_improvements(self) -> None:
         state = _ConvergenceState()
-        state.ewa = 5.0
-        self.assertFalse(state.stalled(2))  # first value is the new minimum
+        self._record(state, 5.0)  # first value is the new minimum
         self.assertEqual(state.ewa_min, 5.0)
-        state.ewa = 6.0
-        self.assertFalse(state.stalled(2))
-        state.ewa = 7.0
-        self.assertTrue(state.stalled(2))
+        self.assertFalse(state.is_stalled(2))
+        self._record(state, 6.0)
+        self.assertFalse(state.is_stalled(2))
+        self._record(state, 7.0)
+        self.assertTrue(state.is_stalled(2))
         self.assertEqual(state.no_improvement, 2)
 
     def test_improvement_resets_counter(self) -> None:
         state = _ConvergenceState()
-        state.ewa = 5.0
-        state.stalled(2)
-        state.ewa = 6.0
-        state.stalled(2)
-        state.ewa = 4.0
-        self.assertFalse(state.stalled(2))
+        for ewa in (5.0, 6.0, 4.0):
+            self._record(state, ewa)
+        self.assertFalse(state.is_stalled(2))
         self.assertEqual(state.no_improvement, 0)
         self.assertEqual(state.ewa_min, 4.0)
 
     def test_none_never_stalls(self) -> None:
         state = _ConvergenceState()
-        state.ewa = 5.0
-        state.stalled(None)
-        for ewa in (6.0, 7.0, 8.0, 9.0):
-            state.ewa = ewa
-            self.assertFalse(state.stalled(None))
+        for ewa in (5.0, 6.0, 7.0, 8.0, 9.0):
+            self._record(state, ewa)
+            self.assertFalse(state.is_stalled(None))
+
+    def test_is_stalled_does_not_change_state(self) -> None:
+        state = _ConvergenceState()
+        for ewa in (5.0, 6.0):
+            self._record(state, ewa)
+        for _ in range(3):
+            state.is_stalled(1)
+        self.assertEqual(state.no_improvement, 1)
+
+    def test_record_before_update_raises(self) -> None:
+        with self.assertRaises(RuntimeError):
+            _ConvergenceState().record_improvement()
 
 
 class TestMiniBatchConvergence(unittest.TestCase):
@@ -137,29 +148,37 @@ class TestMiniBatchConvergence(unittest.TestCase):
 class TestFitStoppingPaths(unittest.TestCase):
     """End-to-end: each stopping rule ends ``fit`` early and says why."""
 
-    def _fit(self, **kw: object) -> list[str]:
+    def _fit(self, **kw: object) -> tuple[list[str], str | None]:
+        """Return (per-step log lines, convergence message or None)."""
         torch.manual_seed(0)
         x = torch.randn(5000, 8)
         km = MiniBatchKMeans(n_clusters=4, verbose=1, random_state=torch.Generator().manual_seed(1))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             km.fit(x, batch_size=500, max_iter=20, **kw)
-        return out.getvalue().splitlines()
+        lines = out.getvalue().splitlines()
+        # verbose also prints "[MiniBatchKMeans] Reassigning ..." lines; ignore those.
+        steps = [line for line in lines if line.startswith("Minibatch step")]
+        converged = [line for line in lines if line.startswith("Converged")]
+        self.assertLessEqual(len(converged), 1)
+        return steps, (converged[0] if converged else None)
 
     def test_small_center_change(self) -> None:
-        lines = self._fit(tol=5e-2, max_no_improvement=None)
-        self.assertTrue(lines[-1].startswith("Converged (small centers change)"))
-        self.assertLess(len(lines) - 1, 200)
+        steps, converged = self._fit(tol=5e-2, max_no_improvement=None)
+        self.assertIsNotNone(converged)
+        self.assertTrue(converged.startswith("Converged (small centers change)"))
+        self.assertLess(len(steps), 200)
 
     def test_lack_of_improvement(self) -> None:
-        lines = self._fit(tol=0.0, max_no_improvement=3)
-        self.assertTrue(lines[-1].startswith("Converged (lack of improvement in inertia)"))
-        self.assertLess(len(lines) - 1, 200)
+        steps, converged = self._fit(tol=0.0, max_no_improvement=3)
+        self.assertIsNotNone(converged)
+        self.assertTrue(converged.startswith("Converged (lack of improvement in inertia)"))
+        self.assertLess(len(steps), 200)
 
     def test_runs_all_steps_when_both_disabled(self) -> None:
-        lines = self._fit(tol=0.0, max_no_improvement=None)
-        self.assertFalse(any(line.startswith("Converged") for line in lines))
-        self.assertEqual(len(lines), 200)  # max_iter * n_samples // batch_size
+        steps, converged = self._fit(tol=0.0, max_no_improvement=None)
+        self.assertIsNone(converged)
+        self.assertEqual(len(steps), 200)  # max_iter * n_samples // batch_size
 
 
 if __name__ == "__main__":

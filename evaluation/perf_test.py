@@ -6,7 +6,6 @@ import argparse
 import json
 import sys
 from collections.abc import Callable
-from typing import NoReturn
 
 import torch
 
@@ -28,6 +27,7 @@ from evaluation.backends.sklearn_backend import (
     run_sklearn_kmeans,
     run_sklearn_minibatch_kmeans,
 )
+from evaluation.cli import fail, non_negative_float, non_negative_int, positive_float, positive_int
 from evaluation.data import gaussian_mixture, train_val_split
 from evaluation.metrics import ari_score, nmi_score, wcss_and_assign_labels_torch
 from evaluation.nvitop_process_memory import (
@@ -35,6 +35,8 @@ from evaluation.nvitop_process_memory import (
     nvitop_process_gpu_memory_during,
     torch_device_index,
 )
+
+PROG = "evaluation.perf_test"
 
 # Rows used to fit centroids; remainder is held out for --eval-quality (WCSS / NMI).
 _TRAIN_FRACTION = 0.75
@@ -177,14 +179,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda:0", help="Device (e.g. cuda:0)")
     p.add_argument(
         "--batch-size",
-        type=int,
+        type=positive_int,
         default=16_384,
         metavar="B",
         help="MiniBatchKMeans batch size (default: 16384; capped at n by each backend)",
     )
     p.add_argument(
         "--reassignment-ratio",
-        type=float,
+        type=non_negative_float,
         default=0.01,
         metavar="R",
         help="reassignment_ratio for minibatchkmeans and sklearnminibatchkmeans (default: 0.01)",
@@ -196,7 +198,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--eval-chunk-rows",
-        type=int,
+        type=positive_int,
         default=8192,
         metavar="R",
         help="Row chunk size for WCSS / label assignment (avoids OOM on GPU; default: 8192)",
@@ -219,7 +221,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--gpu-memory-series-interval",
-        type=float,
+        type=positive_float,
         default=0.05,
         metavar="SEC",
         help="Approximate spacing between series samples when --gpu-memory-series (default: 0.05).",
@@ -231,44 +233,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--flash-warmup-runs",
-        type=int,
+        type=non_negative_int,
         default=2,
         metavar="N",
         help="Uncounted flash-kmeans warmup runs before the clock (default: 2).",
     )
     p.add_argument(
         "--flash-timed-repeats",
-        type=int,
+        type=positive_int,
         default=2,
         metavar="N",
         help="Timed flash-kmeans runs to average (default: 2).",
     )
     return p.parse_args(argv)
-
-
-def _fail(msg: str) -> NoReturn:
-    print(f"evaluation.perf_test: {msg}", file=sys.stderr)
-    sys.exit(1)
-
-
-def _validate_args(args: argparse.Namespace) -> None:
-    """Exit with an error message on the first invalid argument."""
-    checks = [
-        (
-            args.flash_warmup_runs < 0 or args.flash_timed_repeats < 1,
-            "--flash-warmup-runs must be >= 0 and --flash-timed-repeats must be >= 1.",
-        ),
-        (args.eval_chunk_rows < 1, "--eval-chunk-rows must be >= 1."),
-        (args.batch_size < 1, "--batch-size must be >= 1."),
-        (args.reassignment_ratio < 0, "--reassignment-ratio must be >= 0."),
-        (
-            args.gpu_memory_series and float(args.gpu_memory_series_interval) <= 0,
-            "--gpu-memory-series-interval must be > 0.",
-        ),
-    ]
-    for failed, msg in checks:
-        if failed:
-            _fail(msg)
 
 
 def _run_backend(
@@ -320,7 +297,7 @@ def _run_backend(
         )
     if method == FAISSKMEANS:
         return run_faiss_kmeans(x_train, k, niter, seed, dev)
-    _fail(f"unknown method {method!r}.")
+    raise ValueError(f"unknown method {method!r}")
 
 
 def _run_measuring_gpu_memory(
@@ -335,7 +312,7 @@ def _run_measuring_gpu_memory(
         out = run()
         if record_series:
             print(
-                "evaluation.perf_test: --gpu-memory-series ignored on non-CUDA device.",
+                f"{PROG}: --gpu-memory-series ignored on non-CUDA device.",
                 file=sys.stderr,
             )
         return out, None, None, None
@@ -350,14 +327,13 @@ def _run_measuring_gpu_memory(
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    _validate_args(args)
     n, k, d, seed, niter = args.n, args.k, args.d, args.seed, args.niter
     method: MethodName = args.method
     eval_quality = args.eval_quality
 
     dev = torch.device(args.device)
     if dev.type == "cuda" and not torch.cuda.is_available():
-        _fail("--device requests CUDA but torch.cuda.is_available() is False.")
+        fail(PROG, "--device requests CUDA but torch.cuda.is_available() is False.")
 
     print("Generating Gaussian mixture data...")
     x_cpu, y_true = gaussian_mixture(n, k, d, seed=seed)
@@ -367,15 +343,18 @@ def main(argv: list[str] | None = None) -> None:
             x_cpu, y_true, train_fraction=_TRAIN_FRACTION, seed=seed
         )
     except ValueError as e:
-        _fail(str(e))
+        fail(PROG, str(e))
 
     del x_cpu
     n_train = int(x_train.shape[0])
     if n_train < k:
-        _fail(f"need n_train >= k for initialization; got n_train={n_train}, k={k}. Increase --n.")
+        fail(
+            PROG,
+            f"need n_train >= k for initialization; got n_train={n_train}, k={k}. Increase --n.",
+        )
 
     if eval_quality and (x_val is None or int(x_val.shape[0]) < 1):
-        _fail("val split is empty; cannot compute quality.")
+        fail(PROG, "val split is empty; cannot compute quality.")
 
     if (
         not args.no_flash_pin

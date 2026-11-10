@@ -33,8 +33,7 @@ class NvitopProcessGpuMemory:
 
 def _process_gpu_bytes(device_index: int, pid: int) -> int | None:
     try:
-        import psutil
-        from nvitop import Device, NVMLError
+        from nvitop import Device
     except ImportError:
         return None
     try:
@@ -43,8 +42,7 @@ def _process_gpu_bytes(device_index: int, pid: int) -> int | None:
         if gp is None:
             return None
         return int(gp.gpu_memory())
-    except (NVMLError, psutil.Error):
-        # Sampling is best-effort: driver errors or the process exiting mid-query.
+    except Exception:  # noqa: BLE001 - best-effort sampling; a failure here must not lose the benchmark result
         return None
 
 

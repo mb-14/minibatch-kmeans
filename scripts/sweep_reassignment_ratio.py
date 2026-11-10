@@ -28,7 +28,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Literal, NoReturn
+from typing import Any, Literal
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
@@ -40,6 +40,7 @@ from tqdm import tqdm
 
 from evaluation.backends.fast_kmeans import run_fast_kmeans
 from evaluation.backends.minibatch_kmeans import run_minibatch_kmeans
+from evaluation.cli import fail, positive_int
 from evaluation.data import gaussian_mixture, gaussian_mixture_imbalanced
 from evaluation.datasets import load_clustbench_dataset
 from evaluation.heuristics import scaled_niter
@@ -52,6 +53,8 @@ from evaluation.metrics import (
 from evaluation.presets import BENCHMARK_TASKS
 
 ScenarioName = Literal["well_separated", "overlapping", "imbalanced"]
+
+PROG = "sweep_reassignment_ratio"
 
 DEFAULT_RHO_GRID = [
     0.0,
@@ -559,14 +562,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", type=str, default=None, help="torch device (default: cuda:0 or cpu)")
     p.add_argument(
         "--eval-chunk-rows",
-        type=int,
+        type=positive_int,
         default=8192,
         metavar="R",
         help="Chunk rows for label assignment",
     )
     p.add_argument(
         "--batch-size",
-        type=int,
+        type=positive_int,
         default=16_384,
         metavar="B",
         help="Minibatch batch size for MiniBatchKMeans (default: 16384; capped at n per dataset)",
@@ -587,7 +590,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--n-trials",
-        type=int,
+        type=positive_int,
         default=3,
         metavar="N",
         help="Number of independent runs with seeds seed, seed+1, …, seed+N-1 (default: 5). Ignored if --seeds is set.",
@@ -657,35 +660,18 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _fail(msg: str) -> NoReturn:
-    print(f"sweep_reassignment_ratio: {msg}", file=sys.stderr)
-    sys.exit(1)
-
-
 def _require_clustbench() -> None:
     try:
         import clustbench  # noqa: F401 - availability check only
     except ImportError:
-        _fail('clustering-benchmarks required for real mode. pip install -e ".[eval]"')
-
-
-def _validate_run_args(args: argparse.Namespace) -> None:
-    """Checks that only matter when actually fitting (not for --print-params)."""
-    checks = [
-        (args.eval_chunk_rows < 1, "--eval-chunk-rows must be >= 1."),
-        (args.n_trials < 1, "--n-trials must be >= 1."),
-        (args.batch_size < 1, "--batch-size must be >= 1."),
-    ]
-    for failed, msg in checks:
-        if failed:
-            _fail(msg)
+        fail(PROG, 'clustering-benchmarks required for real mode. pip install -e ".[eval]"')
 
 
 def _resolve_seed_list(args: argparse.Namespace) -> list[int]:
     if args.seeds is not None:
         out = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
         if not out:
-            _fail("--seeds must list at least one integer.")
+            fail(PROG, "--seeds must list at least one integer.")
         return out
     n = 2 if args.quick else args.n_trials
     return [args.seed + i for i in range(n)]
@@ -696,7 +682,6 @@ def _print_params(args: argparse.Namespace, sim_grid: list[tuple[int, int, int]]
         print("## sim", file=sys.stderr, flush=True)
         _print_sim_heuristics(grid=sim_grid, batch_size=args.batch_size)
     if args.mode in ("real", "both"):
-        _require_clustbench()
         print("## real", file=sys.stderr, flush=True)
         _print_real_heuristics(
             tasks=list(BENCHMARK_TASKS),
@@ -708,21 +693,22 @@ def _print_params(args: argparse.Namespace, sim_grid: list[tuple[int, int, int]]
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
 
-    if args.mode in ("real", "both") and args.data_path is None:
-        _fail("--data-path is required for --mode real or both.")
+    if args.mode in ("real", "both"):
+        # Check up front so `--mode both` doesn't run the whole sim sweep before failing.
+        if args.data_path is None:
+            fail(PROG, "--data-path is required for --mode real or both.")
+        _require_clustbench()
 
     scenarios: list[ScenarioName]
     sim_grid: list[tuple[int, int, int]]
     try:
         scenarios, sim_grid = _sim_scenarios_and_grid(args)
     except (OSError, ValueError, json.JSONDecodeError) as e:
-        _fail(f"--sim-grid-json: {e}")
+        fail(PROG, f"--sim-grid-json: {e}")
 
     if args.print_params:
         _print_params(args, sim_grid)
         return
-
-    _validate_run_args(args)
 
     dev = torch.device(args.device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
     rho_values = (
@@ -749,7 +735,6 @@ def main(argv: list[str] | None = None) -> None:
             )
         )
     if args.mode in ("real", "both"):
-        _require_clustbench()
         all_rows.extend(
             run_real_sweep(
                 tasks=list(BENCHMARK_TASKS),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 from typing import Any
@@ -29,6 +30,7 @@ from evaluation.backends.sklearn_backend import (
     run_sklearn_kmeans,
     run_sklearn_minibatch_kmeans,
 )
+from evaluation.cli import non_negative_float, positive_int
 from evaluation.datasets import LoadedBenchmark, load_clustbench_dataset
 from evaluation.heuristics import scaled_niter
 from evaluation.metrics import assign_labels_torch, clustbench_best_ari_and_nmi
@@ -158,28 +160,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--n-trials",
-        type=int,
+        type=positive_int,
         default=1,
         metavar="N",
         help="Number of independent runs (seeds seed..seed+N-1). Mean ± sample stdev on best ARI/NMI.",
     )
     p.add_argument(
         "--reassignment-ratio",
-        type=float,
+        type=non_negative_float,
         default=0.1,
         metavar="R",
         help="reassignment_ratio for minibatchkmeans and sklearnminibatchkmeans (default: 0.1).",
     )
     p.add_argument(
         "--batch-size",
-        type=int,
+        type=positive_int,
         default=16_384,
         metavar="B",
         help="Minibatch size for minibatchkmeans and sklearnminibatchkmeans (default: 16384; capped at n per dataset).",
     )
     p.add_argument(
         "--eval-chunk-rows",
-        type=int,
+        type=positive_int,
         default=8192,
         metavar="R",
         help="Row chunk size for assignment to centroids.",
@@ -194,29 +196,9 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _validate_args(args: argparse.Namespace) -> None:
-    """Exit with an error message on the first invalid argument."""
-    checks = [
-        (args.eval_chunk_rows < 1, "--eval-chunk-rows must be >= 1."),
-        (
-            args.reassignment_ratio is not None and args.reassignment_ratio < 0,
-            "--reassignment-ratio must be >= 0.",
-        ),
-        (args.batch_size < 1, "--batch-size must be >= 1."),
-        (args.n_trials < 1, "--n-trials must be >= 1."),
-    ]
-    for failed, msg in checks:
-        if failed:
-            print(f"evaluation.run: {msg}", file=sys.stderr)
-            sys.exit(1)
-
-
-def _running_max(values: list[float]) -> float | None:
-    """Max seeded from -inf (so NaNs never win); None if nothing beat -inf."""
-    best = float("-inf")
-    for v in values:
-        best = max(best, v)
-    return best if best > float("-inf") else None
+def _best_score(values: list[float]) -> float | None:
+    """Max ignoring NaN scores; None if there are none."""
+    return max((v for v in values if not math.isnan(v)), default=None)
 
 
 def _scores_over_references(
@@ -286,8 +268,8 @@ def _method_row(
         by_seed.append(
             {
                 "seed": seed,
-                "best_ari": _running_max([r["ari"] for r in per_ref]),
-                "best_nmi": _running_max([r["nmi"] for r in per_ref]),
+                "best_ari": _best_score([r["ari"] for r in per_ref]),
+                "best_nmi": _best_score([r["nmi"] for r in per_ref]),
             }
         )
 
@@ -321,7 +303,6 @@ def _method_row(
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
-    _validate_args(args)
 
     dev = torch.device(args.device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
     methods = _parse_methods(args.methods, device=dev)
