@@ -41,6 +41,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
+          activate-environment: true
 
       # CPU-only PyTorch keeps the install small; CUDA-only tests skip themselves.
       - name: Install dependencies
