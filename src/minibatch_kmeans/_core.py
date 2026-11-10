@@ -297,7 +297,13 @@ class MiniBatchKMeans:
             inertia = dist_sq.gather(1, labels.unsqueeze(1)).squeeze(1).sum().item()
             return labels, inertia
 
-    def _check_input(self, X: torch.Tensor, predict: bool = False) -> None:
+    def _check_input(
+        self, X: torch.Tensor, predict: bool = False, match_dim: bool | None = None
+    ) -> None:
+        """Validate ``X``. ``match_dim`` (default: ``predict``) checks the column count
+        against fitted centers, when there are any."""
+        if match_dim is None:
+            match_dim = predict
         if X.dim() != 2:
             raise ValueError("Input tensor must be 2D.")
         if X.layout is not torch.strided:
@@ -308,7 +314,11 @@ class MiniBatchKMeans:
             raise ValueError(f"Input tensor dtype {X.dtype} must match model dtype {self.dtype}.")
         if predict and self._cluster_centers is None:
             raise ValueError("Model has not been fitted yet.")
-        if predict and X.shape[1] != self._cluster_centers.shape[1]:
+        if (
+            match_dim
+            and self._cluster_centers is not None
+            and X.shape[1] != self._cluster_centers.shape[1]
+        ):
             raise ValueError(
                 f"Input tensor dim {X.shape[1]} must match cluster centers dim {self._cluster_centers.shape[1]}."
             )
@@ -631,7 +641,7 @@ class MiniBatchKMeans:
             If ``X`` is not 2-D, dtypes differ, or the number of columns does not
             match fitted centers.
         """
-        self._check_input(X)
+        self._check_input(X, match_dim=True)
         device = self.device
 
         if self._cluster_centers is None:
