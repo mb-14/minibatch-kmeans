@@ -42,7 +42,7 @@ from evaluation.backends.fast_kmeans import run_fast_kmeans
 from evaluation.backends.minibatch_kmeans import run_minibatch_kmeans
 from evaluation.cli import fail, positive_int, require_clustbench
 from evaluation.data import gaussian_mixture, gaussian_mixture_imbalanced
-from evaluation.datasets import load_clustbench_dataset_or_skip
+from evaluation.datasets import load_clustbench_dataset_or_skip, missing_clustbench_data
 from evaluation.heuristics import scaled_niter
 from evaluation.metrics import (
     ari_score,
@@ -309,6 +309,10 @@ def run_sim_sweep(
     return rows
 
 
+def _no_datasets_msg(data_path: str) -> str:
+    return f"no clustbench datasets could be loaded from --data-path {data_path!r}; check the path."
+
+
 def run_real_sweep(
     *,
     tasks: list[tuple[str, str]],
@@ -321,6 +325,7 @@ def run_real_sweep(
     progress: bool = True,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    n_loaded = 0
     outer = tqdm(
         tasks,
         desc="real sweep",
@@ -334,6 +339,7 @@ def run_real_sweep(
             loaded = load_clustbench_dataset_or_skip(battery, dataset, path=data_path, prog=PROG)
             if loaded is None:
                 continue
+            n_loaded += 1
 
             x_cpu = loaded.x
             n, d = x_cpu.shape
@@ -442,6 +448,8 @@ def run_real_sweep(
                 mid.close()
     finally:
         outer.close()
+    if n_loaded == 0:
+        fail(PROG, _no_datasets_msg(data_path))
     return rows
 
 
@@ -516,10 +524,12 @@ def _print_real_heuristics(
     headers = ["kind", "battery", "dataset", "ref_index", "n", "k", "d", "n_iter", "batch_size"]
     right_align = [False, False, False, True, True, True, True, True, True]
     rows: list[list[object]] = []
+    n_loaded = 0
     for battery, dataset in tasks:
         loaded = load_clustbench_dataset_or_skip(battery, dataset, path=data_path, prog=PROG)
         if loaded is None:
             continue
+        n_loaded += 1
         x_cpu = loaded.x
         n, d = int(x_cpu.shape[0]), int(x_cpu.shape[1])
         n_clusters = loaded.n_clusters
@@ -530,6 +540,8 @@ def _print_real_heuristics(
             ni = scaled_niter(n)
             bs = int(min(n, batch_size))
             rows.append(["real", battery, dataset, ref_idx, n, k, d, ni, bs])
+    if n_loaded == 0:
+        fail(PROG, _no_datasets_msg(data_path))
     _print_aligned_table(headers, rows, right_align=right_align)
 
 
@@ -673,6 +685,8 @@ def main(argv: list[str] | None = None) -> None:
         if args.data_path is None:
             fail(PROG, "--data-path is required for --mode real or both.")
         require_clustbench(PROG)
+        if missing_clustbench_data(args.data_path, BENCHMARK_TASKS):
+            fail(PROG, _no_datasets_msg(args.data_path))
 
     scenarios: list[ScenarioName]
     sim_grid: list[tuple[int, int, int]]

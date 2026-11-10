@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -19,6 +20,15 @@ class LoadedBenchmark:
     x: torch.Tensor  # float32 CPU dense ``(n, d)``
     labels: list[np.ndarray]  # reference partitions (numpy, int)
     n_clusters: np.ndarray  # k per reference
+
+
+def missing_clustbench_data(path: str, tasks: list[tuple[str, str]]) -> bool:
+    """True if ``path`` holds none of the ``<battery>/<dataset>.data.gz`` files for ``tasks``.
+
+    A cheap up-front check for a wrong ``--data-path``, before any long-running work.
+    """
+    root = Path(path).expanduser()
+    return not any((root / battery / f"{dataset}.data.gz").is_file() for battery, dataset in tasks)
 
 
 def load_clustbench_dataset_or_skip(
