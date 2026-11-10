@@ -6,7 +6,9 @@ import argparse
 import contextlib
 import io
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from evaluation import run
@@ -62,6 +64,33 @@ class TestRequireClustbench(unittest.TestCase):
             run.main(["--data-path", "unused", "--device", "cpu"])
         self.assertEqual(cm.exception.code, 1)
         self.assertIn("clustering-benchmarks is required", err.getvalue())
+
+
+class TestRunNoDatasets(unittest.TestCase):
+    def _main(self, argv: list[str]) -> tuple[int | str | None, str]:
+        err = io.StringIO()
+        with (
+            mock.patch.dict(sys.modules, {"clustbench": mock.MagicMock()}),
+            contextlib.redirect_stderr(err),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            run.main(argv)
+        return cm.exception.code, err.getvalue()
+
+    def test_fails_when_no_dataset_loads(self) -> None:
+        """A wrong --data-path must be an error, not an empty result with exit 0."""
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "out.json"
+            with mock.patch.object(
+                run, "load_clustbench_dataset_or_skip", return_value=None
+            ) as load:
+                code, err = self._main(["--data-path", "/wrong", "--device", "cpu", "-o", str(out)])
+            self.assertEqual(load.call_count, len(run.BENCHMARK_TASKS))
+            self.assertEqual(code, 1)
+            self.assertIn("none of the", err)
+            self.assertIn("'/wrong'", err)
+            self.assertFalse(out.exists())
 
 
 if __name__ == "__main__":

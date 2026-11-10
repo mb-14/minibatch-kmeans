@@ -30,7 +30,7 @@ from evaluation.backends.sklearn_backend import (
     run_sklearn_kmeans,
     run_sklearn_minibatch_kmeans,
 )
-from evaluation.cli import non_negative_float, positive_int, require_clustbench
+from evaluation.cli import fail, non_negative_float, positive_int, require_clustbench
 from evaluation.datasets import LoadedBenchmark, load_clustbench_dataset_or_skip
 from evaluation.heuristics import scaled_niter
 from evaluation.metrics import assign_labels_torch, clustbench_best_ari_and_nmi
@@ -312,13 +312,22 @@ def main(argv: list[str] | None = None) -> None:
     seeds: list[int] = [args.seed + i for i in range(args.n_trials)]
 
     rows: list[dict[str, Any]] = []
+    n_loaded = 0
     for battery, dataset in BENCHMARK_TASKS:
         print(f"Loading {battery}/{dataset}...", flush=True)
         loaded = load_clustbench_dataset_or_skip(battery, dataset, path=args.data_path, prog=PROG)
         if loaded is None:
             continue
+        n_loaded += 1
         rows.extend(
             _method_row(battery, dataset, method, loaded, seeds, dev, args) for method in methods
+        )
+
+    if n_loaded == 0:
+        fail(
+            PROG,
+            f"none of the {len(BENCHMARK_TASKS)} datasets could be loaded from "
+            f"--data-path {args.data_path!r}; check the path.",
         )
 
     if args.output:
