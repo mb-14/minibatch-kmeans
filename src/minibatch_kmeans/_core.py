@@ -783,7 +783,8 @@ class MiniBatchKMeans:
 
         **device** (:class:`torch.device`, optional):
             If set, move ``cluster_centers`` and ``counts`` to this device and use
-            it as the model device.
+            it as the model device. Default: the ``map_location`` device (CPU),
+            not the device the model was saved from.
 
         Returns
         -------
@@ -805,7 +806,7 @@ class MiniBatchKMeans:
                 f"Unsupported checkpoint format_version={version!r}; "
                 f"expected {_CHECKPOINT_FORMAT_VERSION}."
             )
-        target_device = device if device is not None else torch.device(payload["device_str"])
+        target_device = device if device is not None else torch.device(map_location or "cpu")
         dtype = _dtype_from_str(payload["dtype_str"])
         rng = torch.Generator(device="cpu")
         rng.set_state(payload["random_state"])
