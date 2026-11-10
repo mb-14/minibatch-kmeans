@@ -78,12 +78,14 @@ class TestPrefetch(unittest.TestCase):
         torch.manual_seed(0)
         X = torch.randn(20_000, 32)
 
-        def broken_index_select(*args, **kwargs):
+        def broken_index_select(*_args, **_kwargs):
             raise RuntimeError("gather failed")
 
-        with mock.patch.object(core.torch, "index_select", broken_index_select):
-            with self.assertRaisesRegex(RuntimeError, "gather failed"):
-                self._fit(X, max_no_improvement=None)
+        with (
+            mock.patch.object(core.torch, "index_select", broken_index_select),
+            self.assertRaisesRegex(RuntimeError, "gather failed"),
+        ):
+            self._fit(X, max_no_improvement=None)
         self.assertNotIn("minibatch-kmeans-prefetch", self._thread_names())
 
 

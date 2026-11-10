@@ -128,7 +128,7 @@ def _mean_stdev(values: list[float]) -> tuple[float, float]:
     return m, statistics.stdev(values)
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # noqa: C901 - existing debt, split up when touched
     p = argparse.ArgumentParser(
         description="Evaluate k-means backends on benchmark datasets (best ARI/NMI over references).",
     )
@@ -222,7 +222,7 @@ def main(argv: list[str] | None = None) -> None:
                 dataset,
                 path=args.data_path,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - skip unloadable dataset, keep the batch running
             print(f"evaluation.run: failed to load {battery}/{dataset}: {e}", file=sys.stderr)
             continue
 
@@ -262,7 +262,7 @@ def main(argv: list[str] | None = None) -> None:
                             batch_size=args.batch_size,
                             reassignment_ratio=args.reassignment_ratio,
                         )
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 - one failed backend run must not abort the batch
                         print(
                             f"  {method} seed {seed} ref {ref_idx} (k={k}) failed: {e}",
                             file=sys.stderr,

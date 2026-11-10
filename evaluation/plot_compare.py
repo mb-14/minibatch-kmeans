@@ -178,16 +178,9 @@ def _write_heatmaps(
     nested: Mapping[str, Mapping[str, Mapping[str, Any]]],
     out_dir: Path,
 ) -> None:
-    tasks: list[tuple[str, str]] = []
-    for b in BATTERY_ORDER:
-        if b not in nested:
-            continue
-        for d in sorted(nested[b].keys()):
-            tasks.append((b, d))
+    tasks = [(b, d) for b in BATTERY_ORDER if b in nested for d in sorted(nested[b].keys())]
     if not tasks:
-        for b in sorted(nested.keys()):
-            for d in sorted(nested[b].keys()):
-                tasks.append((b, d))
+        tasks = [(b, d) for b in sorted(nested.keys()) for d in sorted(nested[b].keys())]
 
     methods = [m for m in METHOD_ORDER if any(m in nested[b][d] for b, d in tasks)]
     if not methods:

@@ -36,7 +36,7 @@ def train_val_split(
     g = torch.Generator()
     g.manual_seed(seed)
     perm = torch.randperm(n, generator=g)
-    n_train = int(math.floor(train_fraction * n))
+    n_train = math.floor(train_fraction * n)
     n_val = n - n_train
     if n_train < 1 or n_val < 1:
         raise ValueError(

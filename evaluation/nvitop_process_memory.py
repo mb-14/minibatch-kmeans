@@ -42,7 +42,7 @@ def _process_gpu_bytes(device_index: int, pid: int) -> int | None:
         if gp is None:
             return None
         return int(gp.gpu_memory())
-    except Exception:
+    except Exception:  # noqa: BLE001 - memory sampling is best-effort; driver/NVML errors vary
         return None
 
 

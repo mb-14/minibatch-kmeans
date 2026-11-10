@@ -38,10 +38,7 @@ def wcss_torch(
     """
     if chunk_rows < 1:
         raise ValueError("chunk_rows must be >= 1")
-    if eval_device is None:
-        dev = x.device
-    else:
-        dev = _as_device(eval_device)
+    dev = x.device if eval_device is None else _as_device(eval_device)
 
     n = x.shape[0]
 
@@ -74,10 +71,7 @@ def assign_labels_torch(
     """Nearest-centroid labels (same distance definition as ``wcss_torch``), chunked over rows."""
     if chunk_rows < 1:
         raise ValueError("chunk_rows must be >= 1")
-    if eval_device is None:
-        dev = x.device
-    else:
-        dev = _as_device(eval_device)
+    dev = x.device if eval_device is None else _as_device(eval_device)
 
     n = x.shape[0]
 
@@ -113,10 +107,7 @@ def wcss_and_assign_labels_torch(
     """
     if chunk_rows < 1:
         raise ValueError("chunk_rows must be >= 1")
-    if eval_device is None:
-        dev = x.device
-    else:
-        dev = _as_device(eval_device)
+    dev = x.device if eval_device is None else _as_device(eval_device)
 
     n = x.shape[0]
 

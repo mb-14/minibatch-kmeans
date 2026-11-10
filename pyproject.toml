@@ -64,11 +64,36 @@ select = [
     "I",   # isort
     "B",   # flake8-bugbear
     "UP",  # pyupgrade
+    "RUF",  # ruff-specific (unused noqa, unused unpacked vars, ...)
+    "SIM",  # simplifiable code
+    "C4",  # unnecessary comprehensions / collection calls
+    "PERF",  # performance anti-patterns
+    "PIE",  # redundant code (pass, duplicate keys, ...)
+    "RET",  # needless else-after-return, redundant assignments
+    "ISC",  # implicit string concatenation
+    "NPY",  # deprecated NumPy APIs
+    "ERA",  # commented-out code
+    "ARG",  # unused function arguments
+    "BLE",  # blind `except Exception`
+    "S110",  # try/except/pass
+    "TRY",  # exception-handling anti-patterns
+    "PLE",  # pylint errors
+    "PLW",  # pylint warnings
+    "PLR0124",  # comparison with itself
+    "C90",  # mccabe complexity
 ]
 ignore = [
     "E501",  # line length is handled by the formatter
     "B905",  # zip() without strict=
+    "RUF001",  # ambiguous unicode in strings (Greek letters are intentional)
+    "RUF002",  # ambiguous unicode in docstrings
+    "RUF003",  # ambiguous unicode in comments
+    "TRY003",  # long messages in exception constructors
+    "TRY004",  # TypeError for type checks (would change raised exceptions)
 ]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["torch.device"]

@@ -113,7 +113,7 @@ class _BatchPrefetcher:
                     self._gpu[slot].copy_(self._pinned[slot], non_blocking=True)
                     self._copied[slot].record(self._copy_stream)
                 self._ready.put(slot)
-        except BaseException as exc:  # surface errors in the training thread
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the training thread
             self._ready.put(exc)
 
     def next(self) -> torch.Tensor:
@@ -303,7 +303,7 @@ class MiniBatchKMeans:
             self._counts = torch.zeros(self.n_clusters, dtype=X.dtype, device=device)
             self._n_since_last_reassign = 0
 
-    def _mini_batch_convergence(
+    def _mini_batch_convergence(  # noqa: C901 - existing debt
         self,
         step: int,
         n_steps: int,

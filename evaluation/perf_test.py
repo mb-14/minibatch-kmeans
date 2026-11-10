@@ -244,7 +244,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # noqa: C901 - existing debt, split up when touched
     args = parse_args(argv)
     n = args.n
     k = args.k
@@ -319,12 +319,9 @@ def main(argv: list[str] | None = None) -> None:
         )
         sys.exit(1)
 
-    if eval_quality:
-        if x_val is None or int(x_val.shape[0]) < 1:
-            print(
-                "evaluation.perf_test: val split is empty; cannot compute quality.", file=sys.stderr
-            )
-            sys.exit(1)
+    if eval_quality and (x_val is None or int(x_val.shape[0]) < 1):
+        print("evaluation.perf_test: val split is empty; cannot compute quality.", file=sys.stderr)
+        sys.exit(1)
 
     if (
         flash_pin

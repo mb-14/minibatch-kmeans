@@ -269,7 +269,7 @@ def plot_improvement_rho01_minus_rho0_vs_log_n(
         transform=ax.transAxes,
         va="top",
         fontsize=9,
-        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+        bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.5},
     )
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
@@ -377,7 +377,6 @@ def plot_best_rho_scatter(
 
 def compute_insights_text(
     agg: list[dict[str, Any]],
-    rows: list[dict[str, Any]],
 ) -> str:
     """Pearson correlations on 28 config means at ρ=0.1."""
     a01 = [a for a in agg if abs(float(a["rho"]) - 0.1) < 1e-12]
@@ -460,7 +459,7 @@ def main(argv: list[str] | None = None) -> None:
     plot_scatter_n_k_color_delta_rho(agg, 0.1, out / "scatter_log10n_k_delta_ari_rho0.1.png")
     plot_best_rho_scatter(agg, out / "scatter_log10n_k_best_rho.png")
 
-    insight_body = compute_insights_text(agg, rows)
+    insight_body = compute_insights_text(agg)
     rel = str(out.relative_to(_ROOT))
     md = "\n".join(
         [

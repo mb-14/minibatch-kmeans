@@ -31,7 +31,7 @@ def run_sklearn_kmeans(
     _ = batch_size
     with nvtx_range("sklearn_kmeans:as_numpy", device):
         x_np = _x_to_float32_numpy(x)
-    n, _d = x_np.shape
+    _n, _d = x_np.shape
 
     def _fit() -> KMeans:
         km_inner = KMeans(

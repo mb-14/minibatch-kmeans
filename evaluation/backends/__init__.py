@@ -11,8 +11,8 @@ from evaluation.backends.sklearn_backend import (
 
 __all__ = [
     "run_faiss_kmeans",
-    "run_flash_kmeans",
     "run_fast_kmeans",
+    "run_flash_kmeans",
     "run_minibatch_kmeans",
     "run_sklearn_kmeans",
     "run_sklearn_minibatch_kmeans",

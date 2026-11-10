@@ -161,7 +161,7 @@ def _load_or_make_sim_data(
                 payload = torch.load(path, map_location="cpu")
                 x = torch.as_tensor(payload["x"], dtype=torch.float32)
                 y_true = torch.as_tensor(payload["y_true"], dtype=torch.int64)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - unreadable cache; regenerated below
                 pass
             else:
                 if x.shape == (n, d) and y_true.shape == (n,):
@@ -331,7 +331,7 @@ def run_real_sweep(
                     dataset,
                     path=data_path,
                 )
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - skip unloadable dataset
                 print(
                     f"sweep_reassignment_ratio: skip {battery}/{dataset}: {e}",
                     file=sys.stderr,
@@ -526,7 +526,7 @@ def _print_real_heuristics(
                 dataset,
                 path=data_path,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - skip unloadable dataset
             print(
                 f"sweep_reassignment_ratio: skip {battery}/{dataset}: {e}",
                 file=sys.stderr,
@@ -545,7 +545,7 @@ def _print_real_heuristics(
     _print_aligned_table(headers, rows, right_align=right_align)
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # noqa: C901 - existing debt, split up when touched
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--mode",
@@ -674,7 +674,7 @@ def main(argv: list[str] | None = None) -> None:
             _print_sim_heuristics(grid=sim_grid, batch_size=args.batch_size)
         if args.mode in ("real", "both"):
             try:
-                import clustbench  # noqa: F401
+                import clustbench
             except ImportError:
                 print(
                     "sweep_reassignment_ratio: clustering-benchmarks required for real mode. "

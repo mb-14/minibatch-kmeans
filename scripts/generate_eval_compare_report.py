@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from evaluation.compare_runs import load_eval_rollup
@@ -14,7 +15,7 @@ except ImportError:
 
 
 def _fmt_pm(mean: float | None, std: float | None) -> str:
-    if mean is None or mean != mean:
+    if mean is None or math.isnan(mean):
         return "—"
     if std is None or std == 0.0:
         return f"{mean:.4f}"
@@ -22,7 +23,7 @@ def _fmt_pm(mean: float | None, std: float | None) -> str:
 
 
 def _fmt_d(mean: float, std: float | None) -> str:
-    if mean is None or mean != mean:
+    if mean is None or math.isnan(mean):
         return "—"
     if std is None or std == 0.0:
         return f"{mean:+.4f}"
@@ -59,7 +60,7 @@ def main() -> None:
         try:
             _write_compare_figures(reports)
             figure_lines = _figure_markdown()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - figures are optional; report still renders
             print(f"generate_eval_compare_report: figures skipped ({e})", flush=True)
 
     lines: list[str] = []

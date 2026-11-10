@@ -80,7 +80,7 @@ def run_fast_kmeans(
     Init uses the same seed as flash (``randperm(n)[:k]`` rows after ``manual_seed(seed)``).
     """
     x = torch.as_tensor(x, dtype=torch.float32)
-    n, d = x.shape
+    _n, d = x.shape
 
     km = FastKMeansTorch(
         d=d,
