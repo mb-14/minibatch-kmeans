@@ -40,9 +40,9 @@ from tqdm import tqdm
 
 from evaluation.backends.fast_kmeans import run_fast_kmeans
 from evaluation.backends.minibatch_kmeans import run_minibatch_kmeans
-from evaluation.cli import fail, positive_int
+from evaluation.cli import fail, positive_int, require_clustbench
 from evaluation.data import gaussian_mixture, gaussian_mixture_imbalanced
-from evaluation.datasets import load_clustbench_dataset
+from evaluation.datasets import load_clustbench_dataset_or_skip
 from evaluation.heuristics import scaled_niter
 from evaluation.metrics import (
     ari_score,
@@ -166,7 +166,7 @@ def _load_or_make_sim_data(
                 y_true = torch.as_tensor(payload["y_true"], dtype=torch.int64)
             except Exception as e:  # noqa: BLE001 - any unreadable cache entry is just regenerated
                 print(
-                    f"sweep_reassignment_ratio: ignoring unreadable cache {path}: {e}",
+                    f"{PROG}: ignoring unreadable cache {path}: {e}",
                     file=sys.stderr,
                 )
             else:
@@ -331,17 +331,8 @@ def run_real_sweep(
     try:
         for battery, dataset in outer:
             outer.set_postfix_str(f"{battery}/{dataset}", refresh=False)
-            try:
-                loaded = load_clustbench_dataset(
-                    battery,
-                    dataset,
-                    path=data_path,
-                )
-            except Exception as e:  # noqa: BLE001 - skip unloadable dataset
-                print(
-                    f"sweep_reassignment_ratio: skip {battery}/{dataset}: {e}",
-                    file=sys.stderr,
-                )
+            loaded = load_clustbench_dataset_or_skip(battery, dataset, path=data_path, prog=PROG)
+            if loaded is None:
                 continue
 
             x_cpu = loaded.x
@@ -526,17 +517,8 @@ def _print_real_heuristics(
     right_align = [False, False, False, True, True, True, True, True, True]
     rows: list[list[object]] = []
     for battery, dataset in tasks:
-        try:
-            loaded = load_clustbench_dataset(
-                battery,
-                dataset,
-                path=data_path,
-            )
-        except Exception as e:  # noqa: BLE001 - skip unloadable dataset
-            print(
-                f"sweep_reassignment_ratio: skip {battery}/{dataset}: {e}",
-                file=sys.stderr,
-            )
+        loaded = load_clustbench_dataset_or_skip(battery, dataset, path=data_path, prog=PROG)
+        if loaded is None:
             continue
         x_cpu = loaded.x
         n, d = int(x_cpu.shape[0]), int(x_cpu.shape[1])
@@ -660,13 +642,6 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _require_clustbench() -> None:
-    try:
-        import clustbench  # noqa: F401 - availability check only
-    except ImportError:
-        fail(PROG, 'clustering-benchmarks required for real mode. pip install -e ".[eval]"')
-
-
 def _resolve_seed_list(args: argparse.Namespace) -> list[int]:
     if args.seeds is not None:
         out = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
@@ -697,7 +672,7 @@ def main(argv: list[str] | None = None) -> None:
         # Check up front so `--mode both` doesn't run the whole sim sweep before failing.
         if args.data_path is None:
             fail(PROG, "--data-path is required for --mode real or both.")
-        _require_clustbench()
+        require_clustbench(PROG)
 
     scenarios: list[ScenarioName]
     sim_grid: list[tuple[int, int, int]]

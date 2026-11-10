@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,24 @@ class LoadedBenchmark:
     x: torch.Tensor  # float32 CPU dense ``(n, d)``
     labels: list[np.ndarray]  # reference partitions (numpy, int)
     n_clusters: np.ndarray  # k per reference
+
+
+def load_clustbench_dataset_or_skip(
+    battery: str,
+    dataset: str,
+    *,
+    path: str,
+    prog: str,
+) -> LoadedBenchmark | None:
+    """``load_clustbench_dataset``, but print a warning and return None for a missing or bad file.
+
+    Only file and parse errors are caught, so bugs still raise.
+    """
+    try:
+        return load_clustbench_dataset(battery, dataset, path=path)
+    except (OSError, EOFError, ValueError) as e:
+        print(f"{prog}: skipping {battery}/{dataset}: {e}", file=sys.stderr)
+        return None
 
 
 def load_clustbench_dataset(

@@ -388,7 +388,7 @@ def main(argv: list[str] | None = None) -> None:
         dev,
         run,
         record_series=args.gpu_memory_series,
-        series_interval_s=float(args.gpu_memory_series_interval),
+        series_interval_s=args.gpu_memory_series_interval,
     )
 
     row = _benchmark_row(

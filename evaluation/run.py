@@ -30,11 +30,13 @@ from evaluation.backends.sklearn_backend import (
     run_sklearn_kmeans,
     run_sklearn_minibatch_kmeans,
 )
-from evaluation.cli import non_negative_float, positive_int
-from evaluation.datasets import LoadedBenchmark, load_clustbench_dataset
+from evaluation.cli import non_negative_float, positive_int, require_clustbench
+from evaluation.datasets import LoadedBenchmark, load_clustbench_dataset_or_skip
 from evaluation.heuristics import scaled_niter
 from evaluation.metrics import assign_labels_torch, clustbench_best_ari_and_nmi
 from evaluation.presets import BENCHMARK_TASKS
+
+PROG = "evaluation.run"
 
 
 def _parse_methods(
@@ -61,13 +63,13 @@ def _parse_methods(
     for m in raw:
         if m == FLASHKMEANS and device.type != "cuda":
             print(
-                "evaluation.run: skipping flashkmeans (requires CUDA device).",
+                f"{PROG}: skipping flashkmeans (requires CUDA device).",
                 file=sys.stderr,
             )
             continue
         out.append(m)  # type: ignore[arg-type]
     if not out:
-        print("evaluation.run: no methods left to run.", file=sys.stderr)
+        print(f"{PROG}: no methods left to run.", file=sys.stderr)
         sys.exit(1)
     return out
 
@@ -303,6 +305,7 @@ def _method_row(
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
+    require_clustbench(PROG)
 
     dev = torch.device(args.device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
     methods = _parse_methods(args.methods, device=dev)
@@ -311,10 +314,8 @@ def main(argv: list[str] | None = None) -> None:
     rows: list[dict[str, Any]] = []
     for battery, dataset in BENCHMARK_TASKS:
         print(f"Loading {battery}/{dataset}...", flush=True)
-        try:
-            loaded = load_clustbench_dataset(battery, dataset, path=args.data_path)
-        except Exception as e:  # noqa: BLE001 - skip unloadable dataset, keep the batch running
-            print(f"evaluation.run: failed to load {battery}/{dataset}: {e}", file=sys.stderr)
+        loaded = load_clustbench_dataset_or_skip(battery, dataset, path=args.data_path, prog=PROG)
+        if loaded is None:
             continue
         rows.extend(
             _method_row(battery, dataset, method, loaded, seeds, dev, args) for method in methods

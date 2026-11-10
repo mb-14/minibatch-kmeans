@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from collections.abc import Callable
-from typing import NoReturn
+from typing import NoReturn, TypeVar
+
+N = TypeVar("N", int, float)
 
 
 def fail(prog: str, msg: str) -> NoReturn:
@@ -14,19 +17,29 @@ def fail(prog: str, msg: str) -> NoReturn:
     sys.exit(1)
 
 
-def _bounded(
-    convert: Callable[[str], float], ok: Callable[[float], bool], what: str
-) -> Callable[[str], float]:
-    def parse(raw: str) -> float:
+def require_clustbench(prog: str) -> None:
+    """Exit early if clustering-benchmarks is missing, rather than skipping every dataset."""
+    try:
+        import clustbench  # noqa: F401 - availability check only
+    except ImportError:
+        fail(
+            prog,
+            'clustering-benchmarks is required for clustbench datasets. pip install -e ".[eval]"',
+        )
+
+
+def _bounded(convert: Callable[[str], N], ok: Callable[[N], bool], what: str) -> Callable[[str], N]:
+    """argparse ``type=`` that converts with ``convert`` and rejects values failing ``ok``."""
+
+    def parse(raw: str) -> N:
         try:
             value = convert(raw)
         except ValueError:
             raise argparse.ArgumentTypeError(f"invalid value: {raw!r}") from None
-        if not ok(value):
-            raise argparse.ArgumentTypeError(f"must be {what}, got {raw}")
+        if not (math.isfinite(value) and ok(value)):
+            raise argparse.ArgumentTypeError(f"must be a finite number {what}, got {raw}")
         return value
 
-    parse.__name__ = convert.__name__  # argparse names the type in some messages
     return parse
 
 
