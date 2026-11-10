@@ -13,11 +13,6 @@ _DENOM_EPS = 1e-10
 _CHECKPOINT_FORMAT_VERSION = 1
 
 
-def _counts_dtype(dtype: torch.dtype) -> torch.dtype:
-    """Dtype for per-cluster counts and update sums: ``dtype`` promoted to at least float32."""
-    return torch.promote_types(dtype, torch.float32)
-
-
 def _dtype_to_str(dt: torch.dtype) -> str:
     return str(dt)
 
@@ -236,7 +231,9 @@ class MiniBatchKMeans:
 
         **dtype** (`torch.dtype`, default ``torch.float32``):
             Floating dtype of centroids; all input tensors must use the same
-            dtype.
+            dtype. Must be ``torch.float32`` or ``torch.float64``: in half
+            precision the running counts overflow and small center updates
+            round away, so convert half-precision data with ``X.float()``.
         """
         self.n_clusters = n_clusters
         self.verbose = bool(verbose)
@@ -249,6 +246,8 @@ class MiniBatchKMeans:
         if reassignment_ratio < 0:
             raise ValueError("reassignment_ratio should be >= 0.")
         self.reassignment_ratio = reassignment_ratio
+        if dtype not in (torch.float32, torch.float64):
+            raise ValueError(f"dtype must be torch.float32 or torch.float64, got {dtype}.")
         self.device = device
         self.dtype = dtype
         self._cluster_centers: torch.Tensor | None = None
@@ -327,7 +326,7 @@ class MiniBatchKMeans:
             perm = torch.randperm(n_samples, device="cpu", generator=rng)
             seeds = perm[: self.n_clusters]
             self._cluster_centers = X[seeds].to(device).clone()
-            self._counts = torch.zeros(self.n_clusters, dtype=_counts_dtype(X.dtype), device=device)
+            self._counts = torch.zeros(self.n_clusters, dtype=X.dtype, device=device)
             self._n_since_last_reassign = 0
 
     def _mini_batch_convergence(
@@ -463,19 +462,14 @@ class MiniBatchKMeans:
             _, n_features = X.shape
             n_clusters = self._cluster_centers.shape[0]
 
-            # Accumulate in the counts dtype (>= float32): half-precision sums and
-            # counts overflow (float16) or stop growing (bfloat16) past ~65k points.
-            acc = self._counts.dtype
-            batch_weighted = torch.zeros((n_clusters, n_features), device=X.device, dtype=acc)
-            batch_weighted.index_add_(0, labels, X.to(acc))
-            batch_weights = torch.bincount(labels, minlength=n_clusters).to(acc)
+            batch_weighted = torch.zeros((n_clusters, n_features), device=X.device, dtype=X.dtype)
+            batch_weighted.index_add_(0, labels, X)
+            batch_weights = torch.bincount(labels, minlength=n_clusters).to(X.dtype)
 
             mask = batch_weights > 0
             denom = (self._counts + batch_weights).unsqueeze(1).clamp(min=_DENOM_EPS)
-            numerator = self._cluster_centers.to(acc) * self._counts.unsqueeze(1) + batch_weighted
-            centers_new = torch.where(
-                mask.unsqueeze(1), (numerator / denom).to(X.dtype), self._cluster_centers
-            )
+            numerator = self._cluster_centers * self._counts.unsqueeze(1) + batch_weighted
+            centers_new = torch.where(mask.unsqueeze(1), numerator / denom, self._cluster_centers)
             self._counts.copy_(torch.where(mask, self._counts + batch_weights, self._counts))
 
             return centers_new
@@ -829,7 +823,7 @@ class MiniBatchKMeans:
         )
         if payload["fitted"]:
             centers = payload["cluster_centers"].to(device=target_device, dtype=dtype)
-            counts = payload["counts"].to(device=target_device, dtype=_counts_dtype(dtype))
+            counts = payload["counts"].to(device=target_device, dtype=dtype)
             if centers.shape[0] != inst.n_clusters:
                 raise ValueError(
                     f"Checkpoint n_clusters mismatch: expected {inst.n_clusters}, "
