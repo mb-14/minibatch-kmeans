@@ -33,7 +33,7 @@ Repository = "https://github.com/mb-14/minibatch-kmeans"
 Issues = "https://github.com/mb-14/minibatch-kmeans/issues"
 
 [project.optional-dependencies]
-dev = ["pdoc>=14"]
+dev = ["pdoc>=14", "pre-commit>=3.5", "ruff==0.17.4"]
 eval = [
     "clustering-benchmarks>=1.1",
     "fastkmeans>=0.5.0",
@@ -45,3 +45,35 @@ eval = [
 [tool.setuptools.packages.find]
 where = ["src", "."]
 include = ["minibatch_kmeans", "evaluation"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [
+    "clustering-data-v1",
+    "pdoc_html",
+    "profiles",
+    "references",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line length is handled by the formatter
+    "B905",  # zip() without strict=
+]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["torch.device"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["E402"]
+"tests/*" = ["E402"]
+"*.ipynb" = ["E402"]
