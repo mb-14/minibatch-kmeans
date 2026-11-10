@@ -82,6 +82,50 @@ class TestMiniBatchKMeansIO(unittest.TestCase):
                 MiniBatchKMeans.load(path)
             self.assertIn("format_version", str(ctx.exception).lower())
 
+    def _save_fitted(self, td: str, saved_device: str | None = None) -> tuple[Path, torch.Tensor]:
+        """Save a small fitted CPU model; optionally relabel its saved device."""
+        x = torch.randn(50, 3)
+        km = MiniBatchKMeans(n_clusters=3)
+        km.fit(x, batch_size=16, max_iter=1, max_no_improvement=None)
+        path = Path(td) / "m.pt"
+        km.save(path)
+        if saved_device is not None:
+            payload = torch.load(path, weights_only=False)
+            payload["device_str"] = saved_device
+            torch.save(payload, path)
+        return path, x
+
+    def test_load_defaults_to_cpu_not_saved_device(self) -> None:
+        # Runs without CUDA: a checkpoint that claims it was saved on CUDA.
+        with tempfile.TemporaryDirectory() as td:
+            path, x = self._save_fitted(td, saved_device="cuda:0")
+            loaded = MiniBatchKMeans.load(path)
+        self.assertEqual(loaded.device.type, "cpu")
+        self.assertEqual(loaded.cluster_centers.device.type, "cpu")
+        self.assertEqual(loaded._counts.device.type, "cpu")
+        self.assertEqual(loaded.predict(x).shape, (50,))
+
+    def test_load_accepts_dict_and_callable_map_location(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path, x = self._save_fitted(td)
+            for map_location in ({"cuda:0": "cpu"}, lambda storage, _loc: storage):
+                with self.subTest(map_location=type(map_location).__name__):
+                    loaded = MiniBatchKMeans.load(path, map_location=map_location)
+                    self.assertEqual(loaded.device.type, "cpu")
+                    self.assertEqual(loaded.predict(x).shape, (50,))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
+    def test_load_cuda_checkpoint_on_cpu_by_default(self) -> None:
+        x = torch.randn(50, 3)
+        km = MiniBatchKMeans(n_clusters=3, device=torch.device("cuda:0"))
+        km.fit(x, batch_size=16, max_iter=1, max_no_improvement=None)
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "m.pt"
+            km.save(path)
+            loaded = MiniBatchKMeans.load(path)
+        self.assertEqual(loaded.device.type, "cpu")
+        self.assertEqual(loaded.cluster_centers.device.type, "cpu")
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
     def test_load_to_cuda(self) -> None:
         torch.manual_seed(2)
