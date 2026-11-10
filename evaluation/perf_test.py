@@ -5,29 +5,29 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+
 import torch
 
-from evaluation.backends.fast_kmeans import run_fast_kmeans
-from evaluation.backends.minibatch_kmeans import run_minibatch_kmeans
-from evaluation.backends.flash_kmeans import run_flash_kmeans
 from evaluation.backends.faiss_backend import run_faiss_kmeans
+from evaluation.backends.fast_kmeans import run_fast_kmeans
+from evaluation.backends.flash_kmeans import run_flash_kmeans
+from evaluation.backends.methods import (
+    FAISSKMEANS,
+    FASTKMEANS,
+    FLASHKMEANS,
+    MINIBATCHKMEANS,
+    SKLEARNKMEANS,
+    SKLEARNMINIBATCHKMEANS,
+    VALID_METHODS,
+    MethodName,
+)
+from evaluation.backends.minibatch_kmeans import run_minibatch_kmeans
 from evaluation.backends.sklearn_backend import (
     run_sklearn_kmeans,
     run_sklearn_minibatch_kmeans,
 )
-
 from evaluation.data import gaussian_mixture, train_val_split
 from evaluation.metrics import ari_score, nmi_score, wcss_and_assign_labels_torch
-from evaluation.backends.methods import (
-    FASTKMEANS,
-    FAISSKMEANS,
-    FLASHKMEANS,
-    MINIBATCHKMEANS,
-    MethodName,
-    SKLEARNKMEANS,
-    SKLEARNMINIBATCHKMEANS,
-    VALID_METHODS,
-)
 from evaluation.nvitop_process_memory import (
     NvitopProcessGpuMemory,
     nvitop_process_gpu_memory_during,
@@ -105,17 +105,11 @@ def _benchmark_row(
     if gpu_nvitop is not None:
         g = gpu_nvitop
         row["gpu_process_baseline_memory_bytes_nvitop"] = g.baseline_bytes
-        row["gpu_process_baseline_memory_mib_nvitop"] = round(
-            g.baseline_bytes / (1024**2), 3
-        )
+        row["gpu_process_baseline_memory_mib_nvitop"] = round(g.baseline_bytes / (1024**2), 3)
         row["gpu_process_peak_memory_bytes_nvitop"] = g.peak_bytes
-        row["gpu_process_peak_memory_mib_nvitop"] = round(
-            g.peak_bytes / (1024**2), 3
-        )
+        row["gpu_process_peak_memory_mib_nvitop"] = round(g.peak_bytes / (1024**2), 3)
         row["gpu_process_peak_memory_delta_bytes_nvitop"] = g.delta_bytes
-        row["gpu_process_peak_memory_delta_mib_nvitop"] = round(
-            g.delta_bytes / (1024**2), 3
-        )
+        row["gpu_process_peak_memory_delta_mib_nvitop"] = round(g.delta_bytes / (1024**2), 3)
     if gpu_memory_series is not None:
         row["gpu_memory_series_nvitop"] = gpu_memory_series
         if gpu_memory_series_interval_s is not None:
@@ -327,7 +321,9 @@ def main(argv: list[str] | None = None) -> None:
 
     if eval_quality:
         if x_val is None or int(x_val.shape[0]) < 1:
-            print("evaluation.perf_test: val split is empty; cannot compute quality.", file=sys.stderr)
+            print(
+                "evaluation.perf_test: val split is empty; cannot compute quality.", file=sys.stderr
+            )
             sys.exit(1)
 
     if (

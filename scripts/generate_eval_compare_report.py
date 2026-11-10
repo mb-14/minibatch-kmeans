@@ -72,7 +72,9 @@ def main() -> None:
     lines.append("|---------|-------|")
     lines.append("| Backends | `fastkmeans`, `minibatchkmeans` |")
     lines.append("| Iterations | `evaluation.heuristics.scaled_niter(n)` (per dataset) |")
-    lines.append("| Trials | See JSON `n_trials` / `by_seed` (`--n-trials N`, seeds `seed`..`seed+N-1`) |")
+    lines.append(
+        "| Trials | See JSON `n_trials` / `by_seed` (`--n-trials N`, seeds `seed`..`seed+N-1`) |"
+    )
     lines.append("| Data | `--data-path ./clustering-data-v1` |")
     lines.append(
         "| Minibatch batch size | `--batch-size` (default 16384; capped at `n` per dataset) |"
@@ -106,9 +108,7 @@ def main() -> None:
         f"ARI wins — fast **{w['ari_fast']}**, minibatch **{w['ari_mb']}**, tie **{w['ari_tie']}**. "
         f"NMI wins — fast **{w['nmi_fast']}**, minibatch **{w['nmi_mb']}**, tie **{w['nmi_tie']}**.\n"
     )
-    lines.append(
-        "| Dataset | ARI fast | ARI mb | ΔARI | NMI fast | NMI mb | ΔNMI |"
-    )
+    lines.append("| Dataset | ARI fast | ARI mb | ΔARI | NMI fast | NMI mb | ΔNMI |")
     lines.append("|---------|----------|--------|------|----------|--------|------|")
     for c in comp:
         af = _fmt_pm(c["ari_fast"], c.get("ari_fast_std"))
@@ -117,9 +117,7 @@ def main() -> None:
         nm = _fmt_pm(c["nmi_mb"], c.get("nmi_mb_std"))
         d1 = _fmt_d(c["dari"], c.get("dari_std"))
         d2 = _fmt_d(c["dnmi"], c.get("dnmi_std"))
-        lines.append(
-            f"| {c['task']} | {af} | {am} | {d1} | {nf} | {nm} | {d2} |"
-        )
+        lines.append(f"| {c['task']} | {af} | {am} | {d1} | {nf} | {nm} | {d2} |")
     lines.append("")
 
     out = reports / "eval_compare_fast_minibatch.md"

@@ -10,7 +10,9 @@ from evaluation.plot_compare import write_compare_figures_from_json
 
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
-    p = argparse.ArgumentParser(description="Plot ARI/NMI comparison bars and heatmaps from eval JSON.")
+    p = argparse.ArgumentParser(
+        description="Plot ARI/NMI comparison bars and heatmaps from eval JSON."
+    )
     p.add_argument(
         "--input",
         "-i",

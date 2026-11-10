@@ -13,9 +13,9 @@ import math
 from typing import Any
 
 import torch
+from fastkmeans import FastKMeans
 
 from evaluation.backends.timing import run_timed_nvtx
-from fastkmeans import FastKMeans
 
 
 class FastKMeansTorch:
@@ -96,9 +96,7 @@ def run_fast_kmeans(
         verbose=False,
     )
 
-    _, elapsed, cpu_s = run_timed_nvtx(
-        device, "fast_kmeans:train", lambda: km.train(x)
-    )
+    _, elapsed, cpu_s = run_timed_nvtx(device, "fast_kmeans:train", lambda: km.train(x))
 
     centroids = km.centroids
     assert centroids is not None

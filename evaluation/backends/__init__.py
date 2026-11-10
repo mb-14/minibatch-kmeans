@@ -9,7 +9,6 @@ from evaluation.backends.sklearn_backend import (
     run_sklearn_minibatch_kmeans,
 )
 
-
 __all__ = [
     "run_faiss_kmeans",
     "run_flash_kmeans",

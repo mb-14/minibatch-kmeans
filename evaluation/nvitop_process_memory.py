@@ -10,8 +10,9 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 
@@ -106,9 +107,7 @@ def nvitop_process_gpu_memory_during(
     poller.start()
     try:
         if record_series and series is not None:
-            series.append(
-                {"t_s": 0.0, "process_gpu_memory_bytes": baseline}
-            )
+            series.append({"t_s": 0.0, "process_gpu_memory_bytes": baseline})
             last_series_bucket[0] = 0
         t_start[0] = time.perf_counter()
         result = fn()
@@ -121,9 +120,7 @@ def nvitop_process_gpu_memory_during(
     if final is not None:
         peak = max(peak, final)
     delta = max(0, peak - baseline)
-    stats = NvitopProcessGpuMemory(
-        baseline_bytes=baseline, peak_bytes=peak, delta_bytes=delta
-    )
+    stats = NvitopProcessGpuMemory(baseline_bytes=baseline, peak_bytes=peak, delta_bytes=delta)
     if record_series and series is not None:
         t_end = time.perf_counter() - (t_start[0] or time.perf_counter())
         fv = final if final is not None else peak

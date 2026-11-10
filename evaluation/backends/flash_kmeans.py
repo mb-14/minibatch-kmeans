@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-
-from evaluation.backends.timing import run_timed_nvtx, sync_cuda_if_needed
 from flash_kmeans.kmeans_large import kmeans_largeN
 from flash_kmeans.kmeans_triton_impl import batch_kmeans_Euclid
+
+from evaluation.backends.timing import run_timed_nvtx, sync_cuda_if_needed
 
 # Same cutoff as ``FlashKMeans.chunk_size_data_cpu``: CPU matrices with more
 # rows than this are trained by ``kmeans_largeN`` (chunked copies), not by
@@ -79,11 +79,7 @@ def run_flash_kmeans(
         raise ValueError("warmup_runs must be >= 0 and timed_repeats must be >= 1")
     x = torch.as_tensor(x, dtype=torch.float32)
     n, _d = x.shape
-    use_large_n = (
-        device.type == "cuda"
-        and x.device.type == "cpu"
-        and n > _LARGE_N_CPU_ROWS
-    )
+    use_large_n = device.type == "cuda" and x.device.type == "cpu" and n > _LARGE_N_CPU_ROWS
     if use_large_n:
         return _run_flash_large_n(
             x, k, niter, seed, device, warmup_runs=warmup_runs, timed_repeats=timed_repeats

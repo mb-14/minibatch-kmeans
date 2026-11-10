@@ -1,7 +1,6 @@
 import queue
 import threading
 from pathlib import Path
-from typing import Optional
 
 import torch
 
@@ -72,13 +71,9 @@ class _BatchPrefetcher:
         n_features = int(X.shape[1])
         shape = (batch_size, n_features)
         self._pinned = [
-            torch.empty(shape, dtype=X.dtype, pin_memory=True)
-            for _ in range(self._N_SLOTS)
+            torch.empty(shape, dtype=X.dtype, pin_memory=True) for _ in range(self._N_SLOTS)
         ]
-        self._gpu = [
-            torch.empty(shape, dtype=X.dtype, device=device)
-            for _ in range(self._N_SLOTS)
-        ]
+        self._gpu = [torch.empty(shape, dtype=X.dtype, device=device) for _ in range(self._N_SLOTS)]
         self._copied = [torch.cuda.Event() for _ in range(self._N_SLOTS)]
         self._used = [torch.cuda.Event() for _ in range(self._N_SLOTS)]
         self._used_recorded = [False] * self._N_SLOTS
@@ -181,7 +176,7 @@ class MiniBatchKMeans:
         n_clusters: int = 8,
         *,
         verbose: int = 0,
-        random_state: Optional[torch.Generator] = None,
+        random_state: torch.Generator | None = None,
         reassignment_ratio: float = 0.01,
         device: torch.device = torch.device("cpu"),
         dtype: torch.dtype = torch.float32,
@@ -229,7 +224,7 @@ class MiniBatchKMeans:
         self.reassignment_ratio = reassignment_ratio
         self.device = device
         self.dtype = dtype
-        self._cluster_centers: Optional[torch.Tensor] = None
+        self._cluster_centers: torch.Tensor | None = None
 
     @property
     def cluster_centers(self) -> torch.Tensor:
@@ -254,7 +249,9 @@ class MiniBatchKMeans:
             raise ValueError("Model has not been fitted yet.")
         return self._cluster_centers
 
-    def _labels_inertia(self, X: torch.Tensor, return_inertia: bool = True) -> tuple[torch.Tensor, float | None]:
+    def _labels_inertia(
+        self, X: torch.Tensor, return_inertia: bool = True
+    ) -> tuple[torch.Tensor, float | None]:
         """E-step: assign labels and optionally compute inertia.
 
         Returns
@@ -284,15 +281,15 @@ class MiniBatchKMeans:
         if X.layout is not torch.strided:
             raise ValueError("Input must be a dense strided torch.Tensor.")
         if not predict and X.shape[0] < self.n_clusters:
-            raise ValueError(
-                f"n_samples={X.shape[0]} should be >= n_clusters={self.n_clusters}."
-            )
+            raise ValueError(f"n_samples={X.shape[0]} should be >= n_clusters={self.n_clusters}.")
         if X.dtype != self.dtype:
             raise ValueError(f"Input tensor dtype {X.dtype} must match model dtype {self.dtype}.")
         if predict and self._cluster_centers is None:
             raise ValueError("Model has not been fitted yet.")
         if predict and X.shape[1] != self._cluster_centers.shape[1]:
-            raise ValueError(f"Input tensor dim {X.shape[1]} must match cluster centers dim {self._cluster_centers.shape[1]}.")
+            raise ValueError(
+                f"Input tensor dim {X.shape[1]} must match cluster centers dim {self._cluster_centers.shape[1]}."
+            )
 
     def _init_centroids(self, X: torch.Tensor) -> torch.Tensor:
         """Pick initial centroids from ``X`` (``randperm``); reset ``_counts`` and reassign counter."""
@@ -313,9 +310,9 @@ class MiniBatchKMeans:
         n_samples: int,
         batch_size: int,
         centers_new: torch.Tensor,
-        batch_inertia: Optional[float],
+        batch_inertia: float | None,
         tol: float,
-        max_no_improvement: Optional[int],
+        max_no_improvement: int | None,
         inertia_convergence: _ConvergenceState,
     ) -> bool:
         with nvtx_range("_mini_batch_convergence", centers_new.device):
@@ -387,9 +384,7 @@ class MiniBatchKMeans:
             return True
         return False
 
-    def _maybe_reassign_centers(
-        self, X: torch.Tensor, centers: torch.Tensor
-    ) -> torch.Tensor:
+    def _maybe_reassign_centers(self, X: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
         """Replace under-used cluster centers with random points from this minibatch.
 
         When `_random_reassign` allows it (empty clusters or periodic refresh) and
@@ -435,14 +430,10 @@ class MiniBatchKMeans:
             return centers
 
         # Distinct random minibatch rows as new center locations.
-        perm = torch.randperm(
-            X.shape[0], device="cpu", generator=self.random_state
-        ).to(X.device)
+        perm = torch.randperm(X.shape[0], device="cpu", generator=self.random_state).to(X.device)
         new_center_indices = perm[:n_to_reassign]
         if self.verbose:
-            print(
-                f"[MiniBatchKMeans] Reassigning {n_to_reassign} cluster centers."
-            )
+            print(f"[MiniBatchKMeans] Reassigning {n_to_reassign} cluster centers.")
         out = centers.clone()
         out[to_reassign] = X[new_center_indices]
 
@@ -469,18 +460,14 @@ class MiniBatchKMeans:
             _, n_features = X.shape
             n_clusters = self._cluster_centers.shape[0]
 
-            batch_weighted = torch.zeros(
-                (n_clusters, n_features), device=X.device, dtype=X.dtype
-            )
+            batch_weighted = torch.zeros((n_clusters, n_features), device=X.device, dtype=X.dtype)
             batch_weighted.index_add_(0, labels, X)
             batch_weights = torch.bincount(labels, minlength=n_clusters).to(X.dtype)
 
             mask = batch_weights > 0
             denom = (self._counts + batch_weights).unsqueeze(1).clamp(min=_DENOM_EPS)
             numerator = self._cluster_centers * self._counts.unsqueeze(1) + batch_weighted
-            centers_new = torch.where(
-                mask.unsqueeze(1), numerator / denom, self._cluster_centers
-            )
+            centers_new = torch.where(mask.unsqueeze(1), numerator / denom, self._cluster_centers)
             self._counts.copy_(torch.where(mask, self._counts + batch_weights, self._counts))
 
             return centers_new
@@ -507,7 +494,7 @@ class MiniBatchKMeans:
         batch_size: int = 1024,
         max_iter: int = 100,
         tol: float = 0.0,
-        max_no_improvement: Optional[int] = 10,
+        max_no_improvement: int | None = 10,
     ) -> torch.Tensor:
         """Train centroids by repeated random minibatches from ``X``.
 
@@ -575,15 +562,11 @@ class MiniBatchKMeans:
         # ``random_state``. The prefetch thread draws them ahead of the
         # training loop, so they must not share a generator with the
         # reassignment code, or results would depend on thread timing.
-        index_seed = int(
-            torch.randint(0, 2**62, (1,), device="cpu", generator=rng).item()
-        )
+        index_seed = int(torch.randint(0, 2**62, (1,), device="cpu", generator=rng).item())
         index_rng = torch.Generator(device="cpu").manual_seed(index_seed)
 
         prefetcher = (
-            _BatchPrefetcher(X, batch_size, n_steps, index_rng, dev)
-            if use_staging
-            else None
+            _BatchPrefetcher(X, batch_size, n_steps, index_rng, dev) if use_staging else None
         )
         try:
             for i in range(n_steps):
@@ -701,7 +684,7 @@ class MiniBatchKMeans:
         batch_size: int = 1024,
         max_iter: int = 100,
         tol: float = 0.0,
-        max_no_improvement: Optional[int] = 10,
+        max_no_improvement: int | None = 10,
     ) -> torch.Tensor:
         """Train on ``X``, then return cluster labels for every row of ``X``.
 

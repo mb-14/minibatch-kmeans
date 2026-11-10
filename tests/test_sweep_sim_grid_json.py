@@ -12,11 +12,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from scripts import sweep_reassignment_ratio as m
 from scripts.sweep_reassignment_ratio import (
     _load_sim_grid_json,
     _sim_grid_rows_with_niter_and_batch,
 )
-from scripts import sweep_reassignment_ratio as m
 
 
 class TestSweepSimGridJson(unittest.TestCase):

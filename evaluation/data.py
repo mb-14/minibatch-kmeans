@@ -72,9 +72,7 @@ def gaussian_mixture(
     g = torch.Generator()
     g.manual_seed(seed)
     centers = torch.randn(n_clusters, n_features, generator=g, dtype=torch.float32) * center_scale
-    cluster_indices = torch.randint(
-        0, n_clusters, (n_samples,), generator=g, dtype=torch.int64
-    )
+    cluster_indices = torch.randint(0, n_clusters, (n_samples,), generator=g, dtype=torch.int64)
     x = torch.empty((n_samples, n_features), dtype=torch.float32)
     batch = 100_000
     for i in range(0, n_samples, batch):
@@ -104,9 +102,7 @@ def gaussian_mixture_imbalanced(
     centers = torch.randn(n_clusters, n_features, generator=g, dtype=torch.float32) * center_scale
     logits = torch.linspace(0.0, 2.0, n_clusters, dtype=torch.float32)
     probs = torch.softmax(logits, dim=0)
-    cluster_indices = torch.multinomial(
-        probs, n_samples, replacement=True, generator=g
-    )
+    cluster_indices = torch.multinomial(probs, n_samples, replacement=True, generator=g)
     x = torch.empty((n_samples, n_features), dtype=torch.float32)
     batch = 100_000
     for i in range(0, n_samples, batch):

@@ -11,29 +11,28 @@ from typing import Any
 import numpy as np
 import torch
 
+from evaluation.backends.faiss_backend import run_faiss_kmeans
 from evaluation.backends.fast_kmeans import run_fast_kmeans
 from evaluation.backends.flash_kmeans import run_flash_kmeans
+from evaluation.backends.methods import (
+    FAISSKMEANS,
+    FASTKMEANS,
+    FLASHKMEANS,
+    MINIBATCHKMEANS,
+    SKLEARNKMEANS,
+    SKLEARNMINIBATCHKMEANS,
+    VALID_METHODS,
+    MethodName,
+)
 from evaluation.backends.minibatch_kmeans import run_minibatch_kmeans
-from evaluation.backends.faiss_backend import run_faiss_kmeans
 from evaluation.backends.sklearn_backend import (
     run_sklearn_kmeans,
     run_sklearn_minibatch_kmeans,
 )
-from evaluation.metrics import assign_labels_torch, clustbench_best_ari_and_nmi
 from evaluation.datasets import load_clustbench_dataset
 from evaluation.heuristics import scaled_niter
+from evaluation.metrics import assign_labels_torch, clustbench_best_ari_and_nmi
 from evaluation.presets import BENCHMARK_TASKS
-import clustbench
-from evaluation.backends.methods import (
-    FASTKMEANS,
-    FAISSKMEANS,
-    FLASHKMEANS,
-    MINIBATCHKMEANS,
-    MethodName,
-    SKLEARNKMEANS,
-    SKLEARNMINIBATCHKMEANS,
-    VALID_METHODS,
-)
 
 
 def _parse_methods(

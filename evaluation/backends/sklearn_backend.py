@@ -93,9 +93,7 @@ def run_sklearn_minibatch_kmeans(
         km_inner.fit(x_fit)
         return km_inner
 
-    km, elapsed, cpu_s = run_timed_nvtx(
-        device, "sklearn_minibatch_kmeans:fit", _fit
-    )
+    km, elapsed, cpu_s = run_timed_nvtx(device, "sklearn_minibatch_kmeans:fit", _fit)
 
     centers = torch.tensor(
         np.asarray(km.cluster_centers_, dtype=np.float32),

@@ -7,7 +7,6 @@ import argparse
 import json
 import statistics
 import sys
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +65,9 @@ def plot_pooled_delta_vs_rho(
 
     x = np.arange(len(rhos))
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.errorbar(x, d_ari, yerr=d_ari_std, fmt="o-", capsize=3, label="mean ΔARI (± stdev across configs)")
+    ax.errorbar(
+        x, d_ari, yerr=d_ari_std, fmt="o-", capsize=3, label="mean ΔARI (± stdev across configs)"
+    )
     ax.errorbar(x, d_nmi, yerr=d_nmi_std, fmt="s-", capsize=3, label="mean ΔNMI")
     ax.axhline(0.0, color="k", linewidth=0.8, alpha=0.5)
     ax.set_xticks(x)
@@ -250,11 +251,26 @@ def write_markdown(
         "",
     ]
     order = [
-        ("pooled_delta_vs_rho", "Pooled **ΔARI** and **ΔNMI** vs ρ (mean across all dataset/ref configurations)."),
-        ("pooled_ari_vs_rho", "Pooled mean **minibatch ARI** vs ρ with mean **fastkmeans** ARI as a horizontal reference."),
-        ("heatmap_battery_rho", "**Battery × ρ:** mean ΔARI (clustbench families: sipu, fcps, wut, …)."),
-        ("heatmap_dataset_rho", "**Dataset × ρ:** mean ΔARI (some datasets appear in multiple batteries)."),
-        ("speed_ratio_vs_rho", "**Wall-time ratio** minibatch / fastkmeans vs ρ (same hardware; minibatch is often slower here)."),
+        (
+            "pooled_delta_vs_rho",
+            "Pooled **ΔARI** and **ΔNMI** vs ρ (mean across all dataset/ref configurations).",
+        ),
+        (
+            "pooled_ari_vs_rho",
+            "Pooled mean **minibatch ARI** vs ρ with mean **fastkmeans** ARI as a horizontal reference.",
+        ),
+        (
+            "heatmap_battery_rho",
+            "**Battery × ρ:** mean ΔARI (clustbench families: sipu, fcps, wut, …).",
+        ),
+        (
+            "heatmap_dataset_rho",
+            "**Dataset × ρ:** mean ΔARI (some datasets appear in multiple batteries).",
+        ),
+        (
+            "speed_ratio_vs_rho",
+            "**Wall-time ratio** minibatch / fastkmeans vs ρ (same hardware; minibatch is often slower here).",
+        ),
     ]
     for key, caption in order:
         path = figures.get(key)
@@ -278,10 +294,10 @@ def write_markdown(
             "## Regenerate",
             "",
             "```bash",
-            f"conda run -n kmeans-bench python scripts/generate_rho_sweep_report.py \\",
+            "conda run -n kmeans-bench python scripts/generate_rho_sweep_report.py \\",
             f"  --input {input_json.relative_to(_ROOT) if input_json.is_relative_to(_ROOT) else input_json} \\",
-            f"  --out-dir reports/figures/rho_sweep_all \\",
-            f"  --report reports/rho_sweep_all_report.md",
+            "  --out-dir reports/figures/rho_sweep_all \\",
+            "  --report reports/rho_sweep_all_report.md",
             "```",
             "",
             "Optional per-cell ARI curves (one PNG per dataset ref):",

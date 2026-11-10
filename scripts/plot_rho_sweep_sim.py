@@ -96,11 +96,7 @@ def aggregate(
 
 
 def _configs_for_scenario(agg: list[dict[str, Any]], scenario: str) -> list[tuple[int, int]]:
-    cfgs = {
-        (int(a["n"]), int(a["k"]))
-        for a in agg
-        if a["scenario"] == scenario
-    }
+    cfgs = {(int(a["n"]), int(a["k"])) for a in agg if a["scenario"] == scenario}
     return sorted(cfgs, key=lambda t: (t[1], t[0]))
 
 
@@ -263,11 +259,7 @@ def plot_heatmaps(
         for j, k in enumerate(ks):
             ax = axes[i, j]
             rows_n = sorted(
-                {
-                    int(a["n"])
-                    for a in agg
-                    if a["scenario"] == scen and int(a["k"]) == k
-                },
+                {int(a["n"]) for a in agg if a["scenario"] == scen and int(a["k"]) == k},
                 reverse=True,
             )
             if not rows_n:
@@ -289,7 +281,7 @@ def plot_heatmaps(
                     )
                     if row is not None:
                         mat[ri, ci] = row[field]
-            im = ax.imshow(
+            ax.imshow(
                 mat,
                 aspect="auto",
                 cmap="RdBu_r",
@@ -313,7 +305,7 @@ def plot_heatmaps(
         norm=plt.Normalize(vmin=vmin, vmax=vmax),
     )
     mappable.set_array([])
-    cbar = fig.colorbar(
+    fig.colorbar(
         mappable,
         ax=axes.ravel().tolist(),
         shrink=0.55,
@@ -354,7 +346,9 @@ def main() -> None:
     plot_delta_lines(agg, out / "delta_vs_rho_lines.png")
     plot_heatmaps(agg, out / "heatmap_delta_ari.png", "ari")
     plot_heatmaps(agg, out / "heatmap_delta_nmi.png", "nmi")
-    print(f"Wrote:\n  {out / 'delta_vs_rho_lines.png'}\n  {out / 'heatmap_delta_ari.png'}\n  {out / 'heatmap_delta_nmi.png'}")
+    print(
+        f"Wrote:\n  {out / 'delta_vs_rho_lines.png'}\n  {out / 'heatmap_delta_ari.png'}\n  {out / 'heatmap_delta_nmi.png'}"
+    )
 
 
 if __name__ == "__main__":

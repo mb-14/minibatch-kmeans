@@ -19,9 +19,7 @@ class TestTorchDeviceIndex(unittest.TestCase):
 
 class TestNvitopProcessGpuMemoryDataclass(unittest.TestCase):
     def test_delta_non_negative(self) -> None:
-        s = NvitopProcessGpuMemory(
-            baseline_bytes=100, peak_bytes=250, delta_bytes=150
-        )
+        s = NvitopProcessGpuMemory(baseline_bytes=100, peak_bytes=250, delta_bytes=150)
         self.assertEqual(s.peak_bytes - s.baseline_bytes, s.delta_bytes)
 
 

@@ -7,8 +7,8 @@ from typing import Any
 import torch
 
 from evaluation.backends.timing import run_timed_nvtx
-from minibatch_kmeans._utils import nvtx_range
 from minibatch_kmeans import MiniBatchKMeans
+from minibatch_kmeans._utils import nvtx_range
 
 
 def run_minibatch_kmeans(
@@ -56,9 +56,7 @@ def run_minibatch_kmeans(
             max_no_improvement=None,
         )
 
-    centers, elapsed, cpu_s = run_timed_nvtx(
-        device, "minibatch_kmeans:fit", _fit
-    )
+    centers, elapsed, cpu_s = run_timed_nvtx(device, "minibatch_kmeans:fit", _fit)
 
     return {
         "centroids": centers.detach(),

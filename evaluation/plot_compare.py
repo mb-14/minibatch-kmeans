@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -42,11 +43,11 @@ def _load_rows(path: Path) -> list[dict[str, Any]]:
     return data
 
 
-def _pivot_nested(rows: list[Mapping[str, Any]]) -> dict[str, dict[str, dict[str, Mapping[str, Any]]]]:
+def _pivot_nested(
+    rows: list[Mapping[str, Any]],
+) -> dict[str, dict[str, dict[str, Mapping[str, Any]]]]:
     """battery -> dataset -> method -> row."""
-    out: dict[str, dict[str, dict[str, Mapping[str, Any]]]] = defaultdict(
-        lambda: defaultdict(dict)
-    )
+    out: dict[str, dict[str, dict[str, Mapping[str, Any]]]] = defaultdict(lambda: defaultdict(dict))
     for r in rows:
         out[str(r["battery"])][str(r["dataset"])][str(r["method"])] = r
     return {b: {d: dict(mm) for d, mm in dm.items()} for b, dm in out.items()}
@@ -157,7 +158,9 @@ def write_compare_figures_from_json(json_path: Path, out_dir: Path) -> Path:
             _plot_battery_grouped(ax_row, bat, nested, metric, std_key)
         handles, labels = axes[0, 0].get_legend_handles_labels()
         if handles:
-            fig.legend(handles, labels, loc="upper center", ncol=len(handles), bbox_to_anchor=(0.5, 1.02))
+            fig.legend(
+                handles, labels, loc="upper center", ncol=len(handles), bbox_to_anchor=(0.5, 1.02)
+            )
         title = "ARI" if metric == "best_ari" else "NMI"
         fig.suptitle(f"{title} by dataset (mean ± std over seeds)", y=1.06)
         fig.tight_layout()
@@ -264,9 +267,7 @@ def _write_dot_rank_plots(
                 ax.set_title(f"{bat}/{d}")
                 ax.grid(axis="both", alpha=0.3)
         legend_methods = [
-            m
-            for m in METHOD_ORDER
-            if any(m in nested[b][d] for b in batteries for d in nested[b])
+            m for m in METHOD_ORDER if any(m in nested[b][d] for b in batteries for d in nested[b])
         ]
         leg_handles = [
             Line2D(

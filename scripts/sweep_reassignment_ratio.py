@@ -410,7 +410,9 @@ def run_real_sweep(
                                     eval_device=device if x_cpu.device != device else None,
                                 )
                                 y_np_m = pred_m.cpu().numpy().astype(np.int64)
-                                ma, mn = clustbench_best_ari_and_nmi([ref_labels[ref_idx]], y_np_m, k)
+                                ma, mn = clustbench_best_ari_and_nmi(
+                                    [ref_labels[ref_idx]], y_np_m, k
+                                )
 
                                 rows.append(
                                     {
@@ -451,7 +453,9 @@ def _parse_rho_list(raw: str) -> list[float]:
     return [float(p) for p in parts]
 
 
-def _sim_scenarios_and_grid(args: argparse.Namespace) -> tuple[list[ScenarioName], list[tuple[int, int, int]]]:
+def _sim_scenarios_and_grid(
+    args: argparse.Namespace,
+) -> tuple[list[ScenarioName], list[tuple[int, int, int]]]:
     if args.quick:
         return ["well_separated"], QUICK_SIM_GRID
     if args.sim_grid_json is not None:
@@ -698,13 +702,18 @@ def main(argv: list[str] | None = None) -> None:
 
     dev = torch.device(args.device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
 
-    rho_values = _parse_rho_list(args.rho) if args.rho else (QUICK_RHO if args.quick else DEFAULT_RHO_GRID)
+    rho_values = (
+        _parse_rho_list(args.rho) if args.rho else (QUICK_RHO if args.quick else DEFAULT_RHO_GRID)
+    )
 
     def _resolve_seed_list(*, quick: bool) -> list[int]:
         if args.seeds is not None:
             out = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
             if not out:
-                print("sweep_reassignment_ratio: --seeds must list at least one integer.", file=sys.stderr)
+                print(
+                    "sweep_reassignment_ratio: --seeds must list at least one integer.",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
             return out
         if quick:

@@ -99,9 +99,7 @@ def _panel_order(agg: list[dict[str, Any]]) -> list[tuple[str, str]]:
     return sorted(keys, key=lambda t: (t[0], t[1]))
 
 
-def _refs_for_panel(
-    agg: list[dict[str, Any]], battery: str, dataset: str
-) -> list[int]:
+def _refs_for_panel(agg: list[dict[str, Any]], battery: str, dataset: str) -> list[int]:
     return sorted(
         {int(a["ref_index"]) for a in agg if a["battery"] == battery and a["dataset"] == dataset}
     )
@@ -288,7 +286,7 @@ def plot_heatmap(
     ax.set_yticklabels(ylabels, fontsize=9)
     ax.set_xlabel("ρ (reassignment_ratio)")
     ax.set_ylabel("dataset")
-    cbar = fig.colorbar(im, ax=ax, shrink=0.8, label=f"mean Δ{'ARI' if metric == 'ari' else 'NMI'}")
+    fig.colorbar(im, ax=ax, shrink=0.8, label=f"mean Δ{'ARI' if metric == 'ari' else 'NMI'}")
     fig.suptitle(
         f"Δ{'ARI' if metric == 'ari' else 'NMI'} (minibatch − fastkmeans)",
         fontsize=12,

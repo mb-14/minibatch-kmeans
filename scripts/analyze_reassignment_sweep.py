@@ -69,9 +69,7 @@ def _group_key_real(row: dict[str, Any]) -> tuple[str, str, str, int, int, int, 
 
 def build_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Per-cell stats: best ρ by mean minibatch ARI, comparison to ρ=0.01 and fastkmeans."""
-    by_sim: dict[tuple[Any, ...], dict[float, list[float]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
+    by_sim: dict[tuple[Any, ...], dict[float, list[float]]] = defaultdict(lambda: defaultdict(list))
     by_real: dict[tuple[Any, ...], dict[float, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
