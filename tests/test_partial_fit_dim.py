@@ -11,8 +11,12 @@ class TestPartialFitDimCheck(unittest.TestCase):
     def test_mismatched_columns_raise_value_error(self) -> None:
         km = MiniBatchKMeans(n_clusters=3)
         km.partial_fit(torch.randn(100, 4))
+        centers, counts = km.cluster_centers.clone(), km._counts.clone()
         with self.assertRaisesRegex(ValueError, "dim 5"):
             km.partial_fit(torch.randn(100, 5))
+        # The rejected batch leaves the model untouched.
+        torch.testing.assert_close(km.cluster_centers, centers)
+        torch.testing.assert_close(km._counts, counts)
 
     def test_fit_may_change_dimension(self) -> None:
         km = MiniBatchKMeans(n_clusters=3)
