@@ -93,10 +93,9 @@ class _BatchPrefetcher:
         self._thread.start()
 
     def _acquire(self, slot: int) -> bool:
-        while not self._stop.is_set():
-            if self._free[slot].acquire(timeout=0.1):
-                return True
-        return False
+        """Wait until ``slot`` is free. Returns False if :meth:`close` was called."""
+        self._free[slot].acquire()
+        return not self._stop.is_set()
 
     def _worker(self) -> None:
         try:
@@ -141,6 +140,10 @@ class _BatchPrefetcher:
 
     def close(self) -> None:
         self._stop.set()
+        # Wake the worker if it is waiting for a free slot, so it sees the
+        # stop flag at once instead of waiting for a step that never comes.
+        for sem in self._free:
+            sem.release()
         self._thread.join()
         torch.cuda.current_stream(self._device).wait_stream(self._copy_stream)
 
@@ -195,9 +198,11 @@ class MiniBatchKMeans:
             messages.
 
         **random_state** (`torch.Generator` or ``None``):
-            CPU ``torch.Generator`` for sampling minibatches and initialization.
-            If ``None``, a new generator is created with a random seed (runs are
-            not reproducible).
+            CPU ``torch.Generator`` for initialization and center reassignment.
+            :meth:`fit` also takes one draw from it to seed a separate generator
+            that samples the minibatches, so batch sampling stays reproducible
+            when batches are prepared on a background thread. If ``None``, a new
+            generator is created with a random seed (runs are not reproducible).
 
         **reassignment_ratio** (`float`, default ``0.01``):
             During training, clusters whose weight is below this fraction of the
