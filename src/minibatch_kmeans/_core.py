@@ -1,3 +1,4 @@
+import math
 import queue
 import threading
 from pathlib import Path
@@ -80,13 +81,13 @@ class _BatchPrefetcher:
         X: torch.Tensor,
         batch_size: int,
         n_steps: int,
-        index_rng: torch.Generator,
+        indices,
         device: torch.device,
     ) -> None:
         self._X = X
         self._batch_size = batch_size
         self._n_steps = n_steps
-        self._rng = index_rng
+        self._indices = indices
         if device.index is None:
             device = torch.device("cuda", torch.cuda.current_device())
         self._device = device
@@ -117,7 +118,6 @@ class _BatchPrefetcher:
     def _worker(self) -> None:
         try:
             torch.cuda.set_device(self._device)
-            n_samples = self._X.shape[0]
             for i in range(self._n_steps):
                 slot = i % self._N_SLOTS
                 if not self._acquire(slot):
@@ -125,16 +125,15 @@ class _BatchPrefetcher:
                 # The previous upload from this pinned buffer must finish
                 # before the buffer is overwritten.
                 self._copied[slot].synchronize()
-                idx = torch.randint(
-                    0, n_samples, (self._batch_size,), device="cpu", generator=self._rng
-                )
-                torch.index_select(self._X, 0, idx, out=self._pinned[slot])
+                idx = next(self._indices).cpu()
+                m = int(idx.shape[0])  # the last batch of a pass may be smaller
+                torch.index_select(self._X, 0, idx, out=self._pinned[slot][:m])
                 with torch.cuda.stream(self._copy_stream):
                     if self._used_recorded[slot]:
                         self._copy_stream.wait_event(self._used[slot])
-                    self._gpu[slot].copy_(self._pinned[slot], non_blocking=True)
+                    self._gpu[slot][:m].copy_(self._pinned[slot][:m], non_blocking=True)
                     self._copied[slot].record(self._copy_stream)
-                self._ready.put(slot)
+                self._ready.put((slot, m))
         except BaseException as exc:  # noqa: BLE001 - re-raised in the training thread
             self._ready.put(exc)
 
@@ -143,9 +142,9 @@ class _BatchPrefetcher:
         item = self._ready.get()
         if isinstance(item, BaseException):
             raise item
-        slot = item
+        slot, m = item
         torch.cuda.current_stream(self._device).wait_event(self._copied[slot])
-        return self._gpu[slot]
+        return self._gpu[slot][:m]
 
     def release(self) -> None:
         """Mark the batch from the last :meth:`next` as no longer needed."""
@@ -165,15 +164,90 @@ class _BatchPrefetcher:
         torch.cuda.current_stream(self._device).wait_stream(self._copy_stream)
 
 
-def _pairwise_squared_distances(X: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
+_SAMPLING_MODES = ("replacement", "permutation")
+
+
+class _BatchIndexSampler:
+    """Row indices of the minibatches that :meth:`MiniBatchKMeans.fit` trains on.
+
+    ``"replacement"``: ``int(max_iter * n_samples) // batch_size`` batches
+    (at least one), each ``batch_size`` rows drawn uniformly with replacement.
+
+    ``"permutation"``: shuffled passes. Each pass draws a fresh permutation
+    and slices it into consecutive batches, keeping a smaller last batch, so
+    every row is used exactly once per pass. A fractional ``max_iter`` adds a
+    final partial pass over the first ``round(frac * n_samples)`` rows of a
+    new permutation.
+
+    Indices are drawn with ``generator`` on its device, so they are created
+    where they are used to gather rows.
+    """
+
+    def __init__(
+        self,
+        n_samples: int,
+        batch_size: int,
+        max_iter: float,
+        sampling: str,
+        generator: torch.Generator,
+    ) -> None:
+        if sampling not in _SAMPLING_MODES:
+            raise ValueError(f"sampling must be one of {_SAMPLING_MODES}, got {sampling!r}.")
+        self._n = n_samples
+        self._batch_size = batch_size
+        self._sampling = sampling
+        self._rng = generator
+        if sampling == "replacement":
+            self._epoch_rows: list[int] = []
+            self.n_steps = max(1, int(max_iter * n_samples) // batch_size)
+        else:
+            whole = math.floor(max_iter)
+            rest = round((max_iter - whole) * n_samples)
+            self._epoch_rows = [n_samples] * whole + ([rest] if rest else [])
+            self.n_steps = sum(-(-rows // batch_size) for rows in self._epoch_rows)
+
+    def __iter__(self):
+        device = self._rng.device
+        if self._sampling == "replacement":
+            for _ in range(self.n_steps):
+                yield torch.randint(
+                    0, self._n, (self._batch_size,), device=device, generator=self._rng
+                )
+            return
+        for rows in self._epoch_rows:
+            order = torch.randperm(self._n, device=device, generator=self._rng)
+            for begin in range(0, rows, self._batch_size):
+                yield order[begin : min(begin + self._batch_size, rows)]
+
+
+_ASSIGN_DTYPES = (torch.bfloat16, torch.float16)
+
+
+def _pairwise_squared_distances(
+    X: torch.Tensor, C: torch.Tensor, assign_dtype: torch.dtype | None = None
+) -> torch.Tensor:
     """Squared Euclidean distances from each row of ``X`` to each row of ``C``.
 
     The row norms use one reduction each, and the cross term is a single
     matrix product. That avoids a squared copy of ``X`` and a doubled copy of ``X``.
+
+    With ``assign_dtype`` (bfloat16 or float16), the cross term multiplies ``X``
+    and ``C`` rounded to that dtype, accumulating and returning ``X.dtype``; the
+    norms stay in ``X.dtype``. On CUDA this is one half-precision matmul with a
+    float32 output. Elsewhere the rounded values are multiplied in ``X.dtype``,
+    which gives the same products (a product of two 8-bit or 11-bit mantissas is
+    exact in float32).
     """
     x_sq = torch.linalg.vector_norm(X, ord=2, dim=1, keepdim=True).square()
     c_sq = torch.linalg.vector_norm(C, ord=2, dim=1).square()
-    return torch.addmm(c_sq, X, C.T, beta=1, alpha=-2).add_(x_sq)
+    if assign_dtype is None:
+        return torch.addmm(c_sq, X, C.T, beta=1, alpha=-2).add_(x_sq)
+    Xh, Ch = X.to(assign_dtype), C.to(assign_dtype)
+    if X.device.type == "cuda" and X.dtype == torch.float32:
+        dist = torch.addmm(c_sq, Xh, Ch.T, beta=1, alpha=-2, out_dtype=X.dtype)
+    else:
+        dist = torch.addmm(c_sq, Xh.to(X.dtype), Ch.to(X.dtype).T, beta=1, alpha=-2)
+    return dist.add_(x_sq)
 
 
 class MiniBatchKMeans:
@@ -202,6 +276,7 @@ class MiniBatchKMeans:
         reassignment_ratio: float = 0.01,
         device: torch.device = torch.device("cpu"),
         dtype: torch.dtype = torch.float32,
+        assign_dtype: torch.dtype | None = None,
     ):
         """
         Parameters
@@ -234,6 +309,16 @@ class MiniBatchKMeans:
             dtype. Must be ``torch.float32`` or ``torch.float64``: in half
             precision the running counts overflow and small center updates
             round away, so convert half-precision data with ``X.float()``.
+
+        **assign_dtype** (`torch.dtype` or ``None``, default ``None``):
+            Precision of the distance matrix product used to assign rows to
+            centers (in ``fit``, ``partial_fit`` and ``predict``):
+            ``torch.bfloat16`` or ``torch.float16`` rounds the batch and the
+            centers to that dtype for the product only, accumulating in
+            ``dtype``. Norms, centers and counts stay in ``dtype``, so the
+            update rule is unchanged. Faster on GPUs with half-precision tensor
+            cores; near-ties between centers may resolve differently. ``None``
+            computes everything in ``dtype``.
         """
         self.n_clusters = n_clusters
         self.verbose = bool(verbose)
@@ -248,8 +333,13 @@ class MiniBatchKMeans:
         self.reassignment_ratio = reassignment_ratio
         if dtype not in (torch.float32, torch.float64):
             raise ValueError(f"dtype must be torch.float32 or torch.float64, got {dtype}.")
+        if assign_dtype is not None and assign_dtype not in _ASSIGN_DTYPES:
+            raise ValueError(
+                f"assign_dtype must be None, torch.bfloat16 or torch.float16, got {assign_dtype}."
+            )
         self.device = device
         self.dtype = dtype
+        self.assign_dtype = assign_dtype
         self._cluster_centers: torch.Tensor | None = None
 
     @property
@@ -291,7 +381,7 @@ class MiniBatchKMeans:
             ``return_inertia`` is false.
         """
         with nvtx_range("minibatch_kmeans:_labels_inertia", X.device):
-            dist_sq = _pairwise_squared_distances(X, self._cluster_centers)
+            dist_sq = _pairwise_squared_distances(X, self._cluster_centers, self.assign_dtype)
             labels = dist_sq.argmin(dim=1)
 
             if not return_inertia:
@@ -329,6 +419,19 @@ class MiniBatchKMeans:
             self._cluster_centers = X[seeds].to(device).clone()
             self._counts = torch.zeros(self.n_clusters, dtype=X.dtype, device=device)
             self._n_since_last_reassign = 0
+
+    def _set_init_centroids(self, init: torch.Tensor, X: torch.Tensor) -> None:
+        """Start from user-given centers; reset ``_counts`` and the reassign counter."""
+        expected = (self.n_clusters, X.shape[1])
+        if init.dim() != 2 or tuple(init.shape) != expected:
+            raise ValueError(f"init_centroids must have shape {expected}, got {tuple(init.shape)}.")
+        if init.dtype != self.dtype:
+            raise ValueError(
+                f"init_centroids dtype {init.dtype} must match model dtype {self.dtype}."
+            )
+        self._cluster_centers = init.to(self.device).clone()
+        self._counts = torch.zeros(self.n_clusters, dtype=self.dtype, device=self.device)
+        self._n_since_last_reassign = 0
 
     def _mini_batch_convergence(
         self,
@@ -495,13 +598,15 @@ class MiniBatchKMeans:
         X: torch.Tensor,
         *,
         batch_size: int = 1024,
-        max_iter: int = 100,
+        max_iter: float = 100,
         tol: float = 0.0,
         max_no_improvement: int | None = 10,
+        init_centroids: torch.Tensor | None = None,
+        sampling: str = "replacement",
     ) -> torch.Tensor:
         """Train centroids by repeated random minibatches from ``X``.
 
-        Each step draws ``batch_size`` rows with replacement, runs one
+        Each step draws a minibatch of rows (see ``sampling``), runs one
         assignment-and-update step, then checks convergence. When enabled,
         tracks batch inertia for logging and/or inertia-based early stopping.
 
@@ -515,10 +620,11 @@ class MiniBatchKMeans:
         **batch_size** (`int`, default ``1024``):
             Minibatch size (rows sampled per step). Capped at ``n_samples``.
 
-        **max_iter** (`int`, default ``100``):
-            Approximate number of full passes over the dataset; the total number
-            of minibatch steps is ``(max_iter * n_samples) // batch_size`` (integer
-            division).
+        **max_iter** (`float`, default ``100``):
+            Number of passes over the dataset; must be ``> 0`` and may be
+            fractional (``1.5`` is one and a half passes). With
+            ``sampling="replacement"`` the number of minibatch steps is
+            ``int(max_iter * n_samples) // batch_size`` (at least one).
 
         **tol** (`float`, default ``0.0``):
             If ``> 0``, stop when the sum of squared changes to all centers is
@@ -531,6 +637,21 @@ class MiniBatchKMeans:
             tracking is then inactive unless ``verbose`` requests batch inertia
             for logging).
 
+        **init_centroids** (`torch.Tensor` or ``None``, default ``None``):
+            Starting centers, shape ``(n_clusters, n_features)``, same ``dtype``
+            as the model; copied to ``device``. Counts start at zero, as after
+            the default initialization. If ``None``, ``n_clusters`` distinct rows
+            of ``X`` are picked at random.
+
+        **sampling** (`str`, default ``"replacement"``):
+            How minibatch rows are drawn. ``"replacement"``: each batch is
+            ``batch_size`` rows drawn uniformly with replacement.
+            ``"permutation"``: each pass shuffles all rows and walks through
+            them in consecutive batches (the last batch of a pass may be
+            smaller), so every row is used exactly once per pass; a fractional
+            ``max_iter`` ends with a partial pass over
+            ``round(frac * n_samples)`` rows of a fresh shuffle.
+
         Returns
         -------
 
@@ -542,11 +663,15 @@ class MiniBatchKMeans:
 
         If ``device`` is CUDA, ``X`` may remain on CPU; each minibatch is moved to
         the device for computation so large datasets need not fit in GPU memory.
+        Batch indices are drawn on ``device``, so a CUDA model gives the same
+        result whether ``X`` is on the CPU or the GPU.
         """
         if batch_size < 1:
             raise ValueError("batch_size must be >= 1.")
-        if max_iter < 1:
-            raise ValueError("max_iter must be >= 1.")
+        if not max_iter > 0:
+            raise ValueError("max_iter must be > 0.")
+        if sampling not in _SAMPLING_MODES:
+            raise ValueError(f"sampling must be one of {_SAMPLING_MODES}, got {sampling!r}.")
         # fit() trains from scratch: drop old centers so a new feature width is allowed.
         self._cluster_centers = None
         self._check_input(X)
@@ -557,9 +682,11 @@ class MiniBatchKMeans:
         batch_size = min(batch_size, n_samples)
         inertia_convergence = _ConvergenceState()
 
-        self._init_centroids(X)
+        if init_centroids is None:
+            self._init_centroids(X)
+        else:
+            self._set_init_centroids(init_centroids, X)
 
-        n_steps = (max_iter * n_samples) // batch_size
         dev = torch.device(device)
         use_staging = dev.type == "cuda" and X.device.type == "cpu"
 
@@ -568,20 +695,23 @@ class MiniBatchKMeans:
         # training loop, so they must not share a generator with the
         # reassignment code, or results would depend on thread timing.
         index_seed = int(torch.randint(0, 2**62, (1,), device="cpu", generator=rng).item())
-        index_rng = torch.Generator(device="cpu").manual_seed(index_seed)
+        # Indices are drawn on the compute device: a GPU-resident X is
+        # gathered with no host-to-device index copy, and CPU-resident X
+        # (staged by the prefetcher) sees the same index stream, so results
+        # do not depend on where X lives.
+        index_device = dev if dev.type == "cuda" else torch.device("cpu")
+        index_rng = torch.Generator(device=index_device).manual_seed(index_seed)
+        sampler = _BatchIndexSampler(n_samples, batch_size, max_iter, sampling, index_rng)
+        n_steps = sampler.n_steps
+        indices = iter(sampler)
 
-        prefetcher = (
-            _BatchPrefetcher(X, batch_size, n_steps, index_rng, dev) if use_staging else None
-        )
+        prefetcher = _BatchPrefetcher(X, batch_size, n_steps, indices, dev) if use_staging else None
         try:
             for i in range(n_steps):
                 if prefetcher is not None:
                     X_batch = prefetcher.next()
                 else:
-                    mb_idx = torch.randint(
-                        0, n_samples, (batch_size,), device="cpu", generator=index_rng
-                    )
-                    X_batch = X[mb_idx].to(device)
+                    X_batch = X[next(indices)].to(device)
 
                 centers_new, batch_inertia = self._mini_batch_step(
                     X_batch,
@@ -594,7 +724,7 @@ class MiniBatchKMeans:
                     i,
                     n_steps,
                     n_samples,
-                    batch_size,
+                    X_batch.shape[0],
                     centers_new,
                     batch_inertia,
                     tol,
@@ -687,9 +817,11 @@ class MiniBatchKMeans:
         X: torch.Tensor,
         *,
         batch_size: int = 1024,
-        max_iter: int = 100,
+        max_iter: float = 100,
         tol: float = 0.0,
         max_no_improvement: int | None = 10,
+        init_centroids: torch.Tensor | None = None,
+        sampling: str = "replacement",
     ) -> torch.Tensor:
         """Train on ``X``, then return cluster labels for every row of ``X``.
 
@@ -705,14 +837,20 @@ class MiniBatchKMeans:
         **batch_size** (`int`, default ``1024``):
             Minibatch size for ``fit``.
 
-        **max_iter** (`int`, default ``100``):
-            Approximate dataset passes for ``fit``.
+        **max_iter** (`float`, default ``100``):
+            Dataset passes for ``fit``; may be fractional.
 
         **tol** (`float`, default ``0.0``):
             Center-change tolerance for ``fit``.
 
         **max_no_improvement** (`int` or ``None``, default ``10``):
             Inertia early-stop threshold for ``fit``; ``None`` disables.
+
+        **init_centroids** (`torch.Tensor` or ``None``, default ``None``):
+            Starting centers for ``fit``.
+
+        **sampling** (`str`, default ``"replacement"``):
+            Minibatch sampling mode for ``fit``.
 
         Returns
         -------
@@ -733,6 +871,8 @@ class MiniBatchKMeans:
             max_iter=max_iter,
             tol=tol,
             max_no_improvement=max_no_improvement,
+            init_centroids=init_centroids,
+            sampling=sampling,
         )
         return self.predict(X)
 
@@ -756,6 +896,9 @@ class MiniBatchKMeans:
             "verbose": self.verbose,
             "reassignment_ratio": self.reassignment_ratio,
             "dtype_str": _dtype_to_str(self.dtype),
+            "assign_dtype_str": (
+                None if self.assign_dtype is None else _dtype_to_str(self.assign_dtype)
+            ),
             "device_str": str(self.device),
             "fitted": self._cluster_centers is not None,
             "random_state": self.random_state.get_state(),
@@ -823,6 +966,8 @@ class MiniBatchKMeans:
         else:
             target_device = torch.device("cpu")
         dtype = _dtype_from_str(payload["dtype_str"])
+        assign_str = payload.get("assign_dtype_str")  # absent in older checkpoints
+        assign_dtype = None if assign_str is None else _dtype_from_str(assign_str)
         rng = torch.Generator(device="cpu")
         rng.set_state(payload["random_state"])
         inst = cls(
@@ -832,6 +977,7 @@ class MiniBatchKMeans:
             random_state=rng,
             device=target_device,
             dtype=dtype,
+            assign_dtype=assign_dtype,
         )
         if payload["fitted"]:
             centers = payload["cluster_centers"].to(device=target_device, dtype=dtype)
