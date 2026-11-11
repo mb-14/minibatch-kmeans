@@ -1,12 +1,13 @@
 """Fused nearest-centroid assignment on CUDA (Triton).
 
 One kernel computes, for each row ``x`` of ``X``, the minimum over centroids of
-``||c||^2 - 2 x.c`` and its index, streaming centroid tiles through ``tl.dot``
+``||c||^2 - 2 x.c`` and its index (``x`` and ``c`` shifted and rounded exactly
+as in :func:`minibatch_kmeans._core._pairwise_squared_distances`), streaming centroid tiles through ``tl.dot``
 (half-precision inputs, float32 accumulation) and keeping a running min/argmin
 per row in registers. Only ``(min, label)`` per row is written, so the
 ``(n, k)`` distance matrix is never materialized.
 
-The caller adds ``||x||^2`` afterwards when it needs inertia.
+Only the labels feed training; inertia is computed exactly by the caller.
 
 ``triton`` is optional: :data:`AVAILABLE` is false when it cannot be imported,
 and callers must then use the PyTorch path.
@@ -17,6 +18,8 @@ from __future__ import annotations
 import functools
 
 import torch
+
+from ._core import _assign_shift
 
 try:
     import triton
@@ -35,6 +38,7 @@ if AVAILABLE:
     @triton.jit
     def _assign_kernel(
         x_ptr,
+        mu_ptr,
         c_ptr,
         c_sq_ptr,
         out_min_ptr,
@@ -71,11 +75,13 @@ if AVAILABLE:
             for k0 in range(0, d, BLOCK_K):
                 ks = k0 + offs_k
                 k_ok = ks < d
+                mu = tl.load(mu_ptr + ks, mask=k_ok, other=0.0)
                 xt = tl.load(
                     x_ptr + rows64[:, None] * stride_xm + ks[None, :],
                     mask=row_ok[:, None] & k_ok[None, :],
                     other=0.0,
-                ).to(DOT_DTYPE)
+                )
+                xt = (xt - mu[None, :]).to(DOT_DTYPE)
                 ct = tl.load(
                     c_ptr + cols64[None, :] * stride_cn + ks[:, None],
                     mask=col_ok[None, :] & k_ok[:, None],
@@ -136,14 +142,16 @@ def nearest_centroid(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Nearest row of ``C`` for each row of ``X``.
 
-    Both are rounded to ``assign_dtype`` (bfloat16 or float16) for the cross
-    term, accumulated in float32. ``||c||^2`` is computed in float32.
+    Both are shifted by ``_assign_shift(C)`` and rounded to ``assign_dtype``
+    (bfloat16 or float16); products and ``||c||^2`` (of the rounded centers)
+    are accumulated in float32, as in ``_pairwise_squared_distances``.
 
     Returns
     -------
 
     **partial** (`torch.Tensor`, shape ``(n,)``, float32):
-        ``min_j ||c_j||^2 - 2 x.c_j``; add ``||x||^2`` for squared distances.
+        ``min_j ||c_j||^2 - 2 x.c_j`` of the shifted, rounded points; add
+        their ``||x||^2`` for the rounded squared distances.
 
     **labels** (`torch.Tensor`, shape ``(n,)``, int64):
         Index of the minimizing centroid (lowest index on exact ties).
@@ -152,10 +160,13 @@ def nearest_centroid(
         X = X.contiguous()
     n, d = X.shape
     k = C.shape[0]
-    c_sq = torch.linalg.vector_norm(C, ord=2, dim=1).square()
-    # Round C once: every row block streams all of it, so half-precision
-    # tiles halve that traffic. X is rounded tile by tile inside the kernel.
-    C = C.to(assign_dtype).contiguous()
+    # Same rounding as the PyTorch path (_pairwise_squared_distances): shift
+    # by _assign_shift(C), round, and take ||c||^2 from the rounded centers.
+    # C is rounded once here (every row block streams all of it); X is
+    # shifted and rounded tile by tile inside the kernel.
+    mu = _assign_shift(C).contiguous()
+    C = (C - mu).to(assign_dtype).contiguous()
+    c_sq = torch.linalg.vector_norm(C, ord=2, dim=1, dtype=torch.float32).square()
 
     # Few row blocks (small batches) leave SMs idle at large k: split the
     # centroids across a second grid axis and reduce the partial results.
@@ -175,6 +186,7 @@ def nearest_centroid(
     with torch.cuda.device(X.device):
         _assign_kernel[grid](
             X,
+            mu,
             C,
             c_sq,
             out_min,

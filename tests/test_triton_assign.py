@@ -32,7 +32,8 @@ def _check_against_reference(tc, X, C, dt):
     # distance to the chosen center must be (almost) the reference minimum.
     best = ref.gather(1, ref_labels[:, None]).squeeze(1)
     chosen = ref.gather(1, labels[:, None]).squeeze(1)
-    x_sq = X.square().sum(1)
+    # ||x||^2 of the shifted, rounded rows, as the reference uses.
+    x_sq = (X - core._assign_shift(C)).to(dt).float().square().sum(1)
     tol = 1e-5 * (best.abs() + x_sq) + 1e-4
     tc.assertTrue(bool(((chosen - best).abs() <= tol).all()))
     torch.testing.assert_close((partial + x_sq).sum(), best.sum(), rtol=1e-5, atol=1e-3)
@@ -48,6 +49,16 @@ class TestTritonKernel(unittest.TestCase):
             for dt in core._ASSIGN_DTYPES:
                 with self.subTest(n=n, k=k, d=d, dtype=dt):
                     _check_against_reference(self, X, C, dt)
+
+    def test_offset_data(self):
+        # Far from the origin; the kernel must apply the same shift.
+        g = torch.Generator(device="cuda").manual_seed(0)
+        C = 300 + 10 * torch.randn(3000, 48, device="cuda", generator=g)
+        X = C[torch.randint(0, 3000, (700,), device="cuda", generator=g)]
+        X = X + torch.randn(700, 48, device="cuda", generator=g)
+        for dt in core._ASSIGN_DTYPES:
+            with self.subTest(dtype=dt):
+                _check_against_reference(self, X, C, dt)
 
     def test_exact_ties_take_lowest_index(self):
         g = torch.Generator(device="cuda").manual_seed(0)
@@ -75,7 +86,8 @@ class TestTritonKernel(unittest.TestCase):
         best = ref.min(1).values
         chosen = ref.gather(1, labels[:, None]).squeeze(1)
         self.assertTrue(bool(((chosen - best).abs() <= 1e-5 * best.abs() + 1e-4).all()))
-        self.assertAlmostEqual(inertia, best.sum().item(), delta=1e-4 * inertia)
+        exact = (X - km._cluster_centers[labels]).square().sum().item()
+        self.assertAlmostEqual(inertia, exact, delta=1e-5 * exact)
 
     def test_fit_from_cpu_data_matches_pytorch_path(self):
         # CPU data goes through the pinned-memory prefetcher. Both fits use
@@ -132,7 +144,8 @@ class TestFallback(unittest.TestCase):
         want = core._pairwise_squared_distances(X, C, assign_dtype)
         if not spy.called:
             torch.testing.assert_close(labels, want.argmin(1))
-            self.assertAlmostEqual(inertia, want.min(1).values.sum().item(), places=3)
+            exact = (X - C[labels]).square().sum().item()
+            self.assertAlmostEqual(inertia, exact, delta=1e-4 * exact)
         return spy.called
 
     def test_cpu_uses_pytorch(self):

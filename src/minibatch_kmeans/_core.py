@@ -363,19 +363,16 @@ class MiniBatchKMeans:
         """
         with nvtx_range("minibatch_kmeans:_labels_inertia", X.device):
             C = self._cluster_centers
+            labels = None
             if X.is_cuda and self.assign_dtype is not None:
                 from . import _triton_assign as fused  # CPU-only use never loads triton
 
                 if fused.supported(X, C, self.assign_dtype):
                     # Fused distance + argmin: never materializes the (n, k) matrix.
-                    partial, labels = fused.nearest_centroid(X, C, self.assign_dtype)
-                    if not return_inertia:
-                        return labels, None
-                    x_sq = torch.linalg.vector_norm(X, ord=2, dim=1).square()
-                    return labels, partial.add_(x_sq).sum().item()
-
-            dist_sq = _pairwise_squared_distances(X, C, self.assign_dtype)
-            labels = dist_sq.argmin(dim=1)
+                    labels = fused.nearest_centroid(X, C, self.assign_dtype)[1]
+            if labels is None:
+                dist_sq = _pairwise_squared_distances(X, C, self.assign_dtype)
+                labels = dist_sq.argmin(dim=1)
 
             if not return_inertia:
                 return labels, None
@@ -383,7 +380,7 @@ class MiniBatchKMeans:
             if self.assign_dtype is not None:
                 # Exact inertia: the rounded distances carry rounding noise
                 # that would feed early stopping. O(n * d), no (n, k) matrix.
-                diff = X - self._cluster_centers[labels]
+                diff = X - C[labels]
                 return labels, diff.square().sum().item()
             # Reuse E-step distances: inertia = sum_i dist_sq[i, labels[i]]
             inertia = dist_sq.gather(1, labels.unsqueeze(1)).squeeze(1).sum().item()
