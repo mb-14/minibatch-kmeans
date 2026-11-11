@@ -168,6 +168,37 @@ class _BatchPrefetcher:
 _ASSIGN_DTYPES = (torch.bfloat16, torch.float16)
 
 
+def _assign_shift(C: torch.Tensor) -> torch.Tensor:
+    """Offset subtracted from ``X`` and ``C`` before rounding them to ``assign_dtype``.
+
+    Squared distances do not change under a common shift, but rounding error
+    grows with magnitude. Centering on the centers' mean keeps it relative to
+    the spread of the centers rather than to the data's distance from the
+    origin. The mean is snapped to a power-of-two grid no finer than that
+    spread, so integer-valued data (uint8/int8 embeddings) stays integer and
+    exact. NaN centers are ignored.
+    """
+    mu = torch.nan_to_num(C.nanmean(0))
+    spread = torch.nan_to_num(C - mu).abs().amax()
+    step = torch.exp2(torch.floor(torch.log2(spread.clamp(min=torch.finfo(C.dtype).tiny))))
+    return torch.round(mu / step) * step
+
+
+_ADDMM_OUT_DTYPE = {"supported": True}  # cleared on the first TypeError (older torch)
+
+
+def _half_addmm(c_sq: torch.Tensor, Xh: torch.Tensor, Ch: torch.Tensor, dtype: torch.dtype):
+    """``c_sq - 2 Xh @ Ch.T`` accumulated and returned in ``dtype``."""
+    if Xh.device.type == "cuda" and dtype == torch.float32 and _ADDMM_OUT_DTYPE["supported"]:
+        try:
+            return torch.addmm(c_sq, Xh, Ch.T, beta=1, alpha=-2, out_dtype=dtype)
+        except TypeError:
+            _ADDMM_OUT_DTYPE["supported"] = False
+    # The rounded values multiplied in ``dtype`` give the same products (a
+    # product of two 8-bit or 11-bit mantissas is exact in float32).
+    return torch.addmm(c_sq, Xh.to(dtype), Ch.to(dtype).T, beta=1, alpha=-2)
+
+
 def _pairwise_squared_distances(
     X: torch.Tensor, C: torch.Tensor, assign_dtype: torch.dtype | None = None
 ) -> torch.Tensor:
@@ -176,23 +207,22 @@ def _pairwise_squared_distances(
     The row norms use one reduction each, and the cross term is a single
     matrix product. That avoids a squared copy of ``X`` and a doubled copy of ``X``.
 
-    With ``assign_dtype`` (bfloat16 or float16), the cross term multiplies ``X``
-    and ``C`` rounded to that dtype, accumulating and returning ``X.dtype``; the
-    norms stay in ``X.dtype``. On CUDA this is one half-precision matmul with a
-    float32 output. Elsewhere the rounded values are multiplied in ``X.dtype``,
-    which gives the same products (a product of two 8-bit or 11-bit mantissas is
-    exact in float32).
+    With ``assign_dtype`` (bfloat16 or float16), ``X`` and ``C`` are shifted by
+    :func:`_assign_shift` and rounded to that dtype; the result is the squared
+    distances between the rounded points, accumulated in ``X.dtype`` (norms
+    included, so the norms and the cross term carry the same rounding and the
+    result is never far below zero). On CUDA with float32 this is one
+    half-precision matmul with a float32 output.
     """
+    if assign_dtype is not None:
+        mu = _assign_shift(C)
+        Xh, Ch = (X - mu).to(assign_dtype), (C - mu).to(assign_dtype)
+        x_sq = torch.linalg.vector_norm(Xh, ord=2, dim=1, keepdim=True, dtype=X.dtype).square()
+        c_sq = torch.linalg.vector_norm(Ch, ord=2, dim=1, dtype=X.dtype).square()
+        return _half_addmm(c_sq, Xh, Ch, X.dtype).add_(x_sq)
     x_sq = torch.linalg.vector_norm(X, ord=2, dim=1, keepdim=True).square()
     c_sq = torch.linalg.vector_norm(C, ord=2, dim=1).square()
-    if assign_dtype is None:
-        return torch.addmm(c_sq, X, C.T, beta=1, alpha=-2).add_(x_sq)
-    Xh, Ch = X.to(assign_dtype), C.to(assign_dtype)
-    if X.device.type == "cuda" and X.dtype == torch.float32:
-        dist = torch.addmm(c_sq, Xh, Ch.T, beta=1, alpha=-2, out_dtype=X.dtype)
-    else:
-        dist = torch.addmm(c_sq, Xh.to(X.dtype), Ch.to(X.dtype).T, beta=1, alpha=-2)
-    return dist.add_(x_sq)
+    return torch.addmm(c_sq, X, C.T, beta=1, alpha=-2).add_(x_sq)
 
 
 class MiniBatchKMeans:
@@ -258,12 +288,16 @@ class MiniBatchKMeans:
         **assign_dtype** (`torch.dtype` or ``None``, default ``None``):
             Precision of the distance matrix product used to assign rows to
             centers (in ``fit``, ``partial_fit`` and ``predict``):
-            ``torch.bfloat16`` or ``torch.float16`` rounds the batch and the
-            centers to that dtype for the product only, accumulating in
-            ``dtype``. Norms, centers and counts stay in ``dtype``, so the
-            update rule is unchanged. Faster on GPUs with half-precision tensor
-            cores; near-ties between centers may resolve differently. ``None``
-            computes everything in ``dtype``.
+            ``torch.bfloat16`` or ``torch.float16`` shifts the batch and the
+            centers by the centers' mean and rounds them to that dtype for the
+            assignment only, accumulating in ``dtype``. Centers, counts and
+            reported inertia stay exact in ``dtype``, so the update rule is
+            unchanged; rows whose two nearest centers are within rounding
+            error may be assigned differently. Faster only on CUDA with
+            ``dtype=torch.float32`` (half-precision tensor cores); elsewhere it
+            reproduces the rounding without a speedup. ``float16`` keeps more
+            mantissa bits but overflows when centered values exceed 65504.
+            ``None`` computes everything in ``dtype``.
         """
         self.n_clusters = n_clusters
         self.verbose = bool(verbose)
@@ -332,6 +366,11 @@ class MiniBatchKMeans:
             if not return_inertia:
                 return labels, None
 
+            if self.assign_dtype is not None:
+                # Exact inertia: the rounded distances carry rounding noise
+                # that would feed early stopping. O(n * d), no (n, k) matrix.
+                diff = X - self._cluster_centers[labels]
+                return labels, diff.square().sum().item()
             # Reuse E-step distances: inertia = sum_i dist_sq[i, labels[i]]
             inertia = dist_sq.gather(1, labels.unsqueeze(1)).squeeze(1).sum().item()
             return labels, inertia
