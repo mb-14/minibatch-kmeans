@@ -4,6 +4,7 @@ from pathlib import Path
 
 import torch
 
+from . import _triton_assign
 from ._utils import default_cpu_generator, nvtx_range
 
 # Reassignment: threshold is _REASSIGN_K * n_clusters samples since last pass (empty clusters force sooner).
@@ -297,7 +298,9 @@ class MiniBatchKMeans:
             ``dtype=torch.float32`` (half-precision tensor cores); elsewhere it
             reproduces the rounding without a speedup. ``float16`` keeps more
             mantissa bits but overflows when centered values exceed 65504.
-            ``None`` computes everything in ``dtype``.
+            ``None`` computes everything in ``dtype``. On CUDA with ``float32``
+            data and ``triton`` installed, assignment runs as one fused kernel
+            that never stores the ``(batch, n_clusters)`` distance matrix.
         """
         self.n_clusters = n_clusters
         self.verbose = bool(verbose)
@@ -360,7 +363,16 @@ class MiniBatchKMeans:
             ``return_inertia`` is false.
         """
         with nvtx_range("minibatch_kmeans:_labels_inertia", X.device):
-            dist_sq = _pairwise_squared_distances(X, self._cluster_centers, self.assign_dtype)
+            C = self._cluster_centers
+            if _triton_assign.supported(X, C, self.assign_dtype):
+                # Fused distance + argmin: never materializes the (n, k) matrix.
+                partial, labels = _triton_assign.nearest_centroid(X, C, self.assign_dtype)
+                if not return_inertia:
+                    return labels, None
+                x_sq = torch.linalg.vector_norm(X, ord=2, dim=1).square()
+                return labels, partial.add_(x_sq).sum().item()
+
+            dist_sq = _pairwise_squared_distances(X, C, self.assign_dtype)
             labels = dist_sq.argmin(dim=1)
 
             if not return_inertia:
