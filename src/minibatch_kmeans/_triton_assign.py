@@ -105,7 +105,7 @@ if AVAILABLE:
 # One fixed tile config, no autotuning: autotuning costs seconds per new shape
 # in every fresh process, and configs with different BLOCK_K sum the dot
 # products in different orders, so the chosen config would change results.
-_BLOCK_M, _BLOCK_N, _BLOCK_K = 128, 128, 32
+_BLOCK_M, _BLOCK_N, _BLOCK_K = 128, 256, 32
 _NUM_WARPS, _NUM_STAGES = 8, 3
 
 
