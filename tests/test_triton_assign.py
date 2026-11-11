@@ -101,12 +101,28 @@ class TestTritonKernel(unittest.TestCase):
             )
             return km.cluster_centers
 
+        def inertia(centers):
+            return torch.cdist(X, centers.cpu()).min(1).values.square().mean().item()
+
         with mock.patch.object(ta, "nearest_centroid", wraps=ta.nearest_centroid) as spy:
             got = fit()
         self.assertTrue(spy.called)
         with mock.patch.object(ta, "supported", return_value=False):
             want = fit()
-        torch.testing.assert_close(got, want, rtol=1e-4, atol=1e-4)
+        # The two paths sum dot products in different orders, so a near-tie
+        # can flip a label and nudge a center; compare the fit quality.
+        self.assertAlmostEqual(inertia(got), inertia(want), delta=1e-3 * inertia(want))
+
+    def test_nan_center_wins_like_argmin(self):
+        g = torch.Generator(device="cuda").manual_seed(0)
+        X = torch.randn(300, 16, device="cuda", generator=g)
+        for k, bad in [(40, 7), (5000, 3000)]:  # one tile; split centroids
+            C = torch.randn(k, 16, device="cuda", generator=g)
+            C[bad] = float("nan")
+            partial, labels = ta.nearest_centroid(X, C, torch.bfloat16)
+            ref = core._pairwise_squared_distances(X, C, torch.bfloat16)
+            torch.testing.assert_close(labels, ref.argmin(1))
+            self.assertTrue(bool(partial.isnan().all()))
 
 
 class TestFallback(unittest.TestCase):

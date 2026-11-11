@@ -33,7 +33,7 @@ Repository = "https://github.com/mb-14/minibatch-kmeans"
 Issues = "https://github.com/mb-14/minibatch-kmeans/issues"
 
 [project.optional-dependencies]
-triton = ["triton>=3.0"]
+triton = ["triton>=3.0; platform_system == 'Linux'"]
 dev = ["pdoc>=14", "pre-commit>=3.5", "ruff==0.17.4"]
 eval = [
     "clustering-benchmarks>=1.1",

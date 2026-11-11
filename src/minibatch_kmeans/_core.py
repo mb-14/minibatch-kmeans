@@ -4,7 +4,6 @@ from pathlib import Path
 
 import torch
 
-from . import _triton_assign
 from ._utils import default_cpu_generator, nvtx_range
 
 # Reassignment: threshold is _REASSIGN_K * n_clusters samples since last pass (empty clusters force sooner).
@@ -364,13 +363,16 @@ class MiniBatchKMeans:
         """
         with nvtx_range("minibatch_kmeans:_labels_inertia", X.device):
             C = self._cluster_centers
-            if _triton_assign.supported(X, C, self.assign_dtype):
-                # Fused distance + argmin: never materializes the (n, k) matrix.
-                partial, labels = _triton_assign.nearest_centroid(X, C, self.assign_dtype)
-                if not return_inertia:
-                    return labels, None
-                x_sq = torch.linalg.vector_norm(X, ord=2, dim=1).square()
-                return labels, partial.add_(x_sq).sum().item()
+            if X.is_cuda and self.assign_dtype is not None:
+                from . import _triton_assign as fused  # CPU-only use never loads triton
+
+                if fused.supported(X, C, self.assign_dtype):
+                    # Fused distance + argmin: never materializes the (n, k) matrix.
+                    partial, labels = fused.nearest_centroid(X, C, self.assign_dtype)
+                    if not return_inertia:
+                        return labels, None
+                    x_sq = torch.linalg.vector_norm(X, ord=2, dim=1).square()
+                    return labels, partial.add_(x_sq).sum().item()
 
             dist_sq = _pairwise_squared_distances(X, C, self.assign_dtype)
             labels = dist_sq.argmin(dim=1)

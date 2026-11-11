@@ -14,12 +14,14 @@ and callers must then use the PyTorch path.
 
 from __future__ import annotations
 
+import functools
+
 import torch
 
 try:
     import triton
     import triton.language as tl
-except ImportError:  # pragma: no cover - exercised only without triton installed
+except Exception:  # noqa: BLE001 - triton missing, or broken (version mismatch)
     triton = None
     tl = None
 
@@ -51,9 +53,9 @@ if AVAILABLE:
     ):
         pid_m = tl.program_id(0)
         pid_s = tl.program_id(1)
-        rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        row_ok = rows < n_rows
-        rows64 = rows.to(tl.int64)
+        # int64 row offsets: n * d can exceed 2**31 for GPU-resident data.
+        rows64 = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+        row_ok = rows64 < n_rows
         offs_k = tl.arange(0, BLOCK_K)
 
         best = tl.full((BLOCK_M,), float("inf"), tl.float32)
@@ -83,6 +85,9 @@ if AVAILABLE:
             c_sq = tl.load(c_sq_ptr + cols, mask=col_ok, other=0.0)
             dist = c_sq[None, :] - 2.0 * acc
             dist = tl.where(col_ok[None, :], dist, float("inf"))
+            # Like torch.argmin, a NaN distance wins (first one); as -inf it
+            # survives the strict "<" below, and is turned back into NaN.
+            dist = tl.where(dist != dist, float("-inf"), dist)  # noqa: PLR0124 - NaN test
             tile_min, tile_arg = tl.min(
                 dist, axis=1, return_indices=True, return_indices_tie_break_left=True
             )
@@ -91,6 +96,7 @@ if AVAILABLE:
             best_idx = tl.where(better, n0 + tile_arg, best_idx)
             best = tl.where(better, tile_min, best)
 
+        best = tl.where(best == float("-inf"), float("nan"), best)
         out = rows64 * N_SPLIT + pid_s
         tl.store(out_min_ptr + out, best, mask=row_ok)
         tl.store(out_idx_ptr + out, best_idx, mask=row_ok)
@@ -101,6 +107,11 @@ if AVAILABLE:
 # products in different orders, so the chosen config would change results.
 _BLOCK_M, _BLOCK_N, _BLOCK_K = 128, 128, 32
 _NUM_WARPS, _NUM_STAGES = 8, 3
+
+
+@functools.cache
+def _sm_count(device: torch.device) -> int:
+    return torch.cuda.get_device_properties(device).multi_processor_count
 
 
 def supported(X: torch.Tensor, C: torch.Tensor, assign_dtype: torch.dtype | None) -> bool:
@@ -139,14 +150,16 @@ def nearest_centroid(
     """
     if X.stride(1) != 1:
         X = X.contiguous()
-    C = C.contiguous()
     n, d = X.shape
     k = C.shape[0]
     c_sq = torch.linalg.vector_norm(C, ord=2, dim=1).square()
+    # Round C once: every row block streams all of it, so half-precision
+    # tiles halve that traffic. X is rounded tile by tile inside the kernel.
+    C = C.to(assign_dtype).contiguous()
 
     # Few row blocks (small batches) leave SMs idle at large k: split the
     # centroids across a second grid axis and reduce the partial results.
-    sms = torch.cuda.get_device_properties(X.device).multi_processor_count
+    sms = _sm_count(X.device)
     row_blocks = triton.cdiv(n, _BLOCK_M)
     n_split = 1
     while row_blocks * n_split < 2 * sms and k // (n_split * 2) >= 512:
@@ -157,26 +170,29 @@ def nearest_centroid(
     out_idx = torch.empty((n, n_split), device=X.device, dtype=torch.int32)
 
     grid = (row_blocks, n_split)
-    _assign_kernel[grid](
-        X,
-        C,
-        c_sq,
-        out_min,
-        out_idx,
-        n,
-        k,
-        d,
-        X.stride(0),
-        C.stride(0),
-        cent_per_split,
-        N_SPLIT=n_split,
-        DOT_DTYPE=_TL_DTYPES[assign_dtype],
-        BLOCK_M=_BLOCK_M,
-        BLOCK_N=_BLOCK_N,
-        BLOCK_K=_BLOCK_K,
-        num_warps=_NUM_WARPS,
-        num_stages=_NUM_STAGES,
-    )
+    # Triton launches on the current device's current stream; make that X's
+    # device, whose stream is the one the prefetcher synchronizes with.
+    with torch.cuda.device(X.device):
+        _assign_kernel[grid](
+            X,
+            C,
+            c_sq,
+            out_min,
+            out_idx,
+            n,
+            k,
+            d,
+            X.stride(0),
+            C.stride(0),
+            cent_per_split,
+            N_SPLIT=n_split,
+            DOT_DTYPE=_TL_DTYPES[assign_dtype],
+            BLOCK_M=_BLOCK_M,
+            BLOCK_N=_BLOCK_N,
+            BLOCK_K=_BLOCK_K,
+            num_warps=_NUM_WARPS,
+            num_stages=_NUM_STAGES,
+        )
     if n_split == 1:
         return out_min.squeeze(1), out_idx.squeeze(1).long()
     # Splits cover increasing centroid ranges; argmin returns the first
