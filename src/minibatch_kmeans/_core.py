@@ -165,15 +165,34 @@ class _BatchPrefetcher:
         torch.cuda.current_stream(self._device).wait_stream(self._copy_stream)
 
 
-def _pairwise_squared_distances(X: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
+_ASSIGN_DTYPES = (torch.bfloat16, torch.float16)
+
+
+def _pairwise_squared_distances(
+    X: torch.Tensor, C: torch.Tensor, assign_dtype: torch.dtype | None = None
+) -> torch.Tensor:
     """Squared Euclidean distances from each row of ``X`` to each row of ``C``.
 
     The row norms use one reduction each, and the cross term is a single
     matrix product. That avoids a squared copy of ``X`` and a doubled copy of ``X``.
+
+    With ``assign_dtype`` (bfloat16 or float16), the cross term multiplies ``X``
+    and ``C`` rounded to that dtype, accumulating and returning ``X.dtype``; the
+    norms stay in ``X.dtype``. On CUDA this is one half-precision matmul with a
+    float32 output. Elsewhere the rounded values are multiplied in ``X.dtype``,
+    which gives the same products (a product of two 8-bit or 11-bit mantissas is
+    exact in float32).
     """
     x_sq = torch.linalg.vector_norm(X, ord=2, dim=1, keepdim=True).square()
     c_sq = torch.linalg.vector_norm(C, ord=2, dim=1).square()
-    return torch.addmm(c_sq, X, C.T, beta=1, alpha=-2).add_(x_sq)
+    if assign_dtype is None:
+        return torch.addmm(c_sq, X, C.T, beta=1, alpha=-2).add_(x_sq)
+    Xh, Ch = X.to(assign_dtype), C.to(assign_dtype)
+    if X.device.type == "cuda" and X.dtype == torch.float32:
+        dist = torch.addmm(c_sq, Xh, Ch.T, beta=1, alpha=-2, out_dtype=X.dtype)
+    else:
+        dist = torch.addmm(c_sq, Xh.to(X.dtype), Ch.to(X.dtype).T, beta=1, alpha=-2)
+    return dist.add_(x_sq)
 
 
 class MiniBatchKMeans:
@@ -202,6 +221,7 @@ class MiniBatchKMeans:
         reassignment_ratio: float = 0.01,
         device: torch.device = torch.device("cpu"),
         dtype: torch.dtype = torch.float32,
+        assign_dtype: torch.dtype | None = None,
     ):
         """
         Parameters
@@ -234,6 +254,16 @@ class MiniBatchKMeans:
             dtype. Must be ``torch.float32`` or ``torch.float64``: in half
             precision the running counts overflow and small center updates
             round away, so convert half-precision data with ``X.float()``.
+
+        **assign_dtype** (`torch.dtype` or ``None``, default ``None``):
+            Precision of the distance matrix product used to assign rows to
+            centers (in ``fit``, ``partial_fit`` and ``predict``):
+            ``torch.bfloat16`` or ``torch.float16`` rounds the batch and the
+            centers to that dtype for the product only, accumulating in
+            ``dtype``. Norms, centers and counts stay in ``dtype``, so the
+            update rule is unchanged. Faster on GPUs with half-precision tensor
+            cores; near-ties between centers may resolve differently. ``None``
+            computes everything in ``dtype``.
         """
         self.n_clusters = n_clusters
         self.verbose = bool(verbose)
@@ -248,8 +278,13 @@ class MiniBatchKMeans:
         self.reassignment_ratio = reassignment_ratio
         if dtype not in (torch.float32, torch.float64):
             raise ValueError(f"dtype must be torch.float32 or torch.float64, got {dtype}.")
+        if assign_dtype is not None and assign_dtype not in _ASSIGN_DTYPES:
+            raise ValueError(
+                f"assign_dtype must be None, torch.bfloat16 or torch.float16, got {assign_dtype}."
+            )
         self.device = device
         self.dtype = dtype
+        self.assign_dtype = assign_dtype
         self._cluster_centers: torch.Tensor | None = None
 
     @property
@@ -291,7 +326,7 @@ class MiniBatchKMeans:
             ``return_inertia`` is false.
         """
         with nvtx_range("minibatch_kmeans:_labels_inertia", X.device):
-            dist_sq = _pairwise_squared_distances(X, self._cluster_centers)
+            dist_sq = _pairwise_squared_distances(X, self._cluster_centers, self.assign_dtype)
             labels = dist_sq.argmin(dim=1)
 
             if not return_inertia:
@@ -756,6 +791,9 @@ class MiniBatchKMeans:
             "verbose": self.verbose,
             "reassignment_ratio": self.reassignment_ratio,
             "dtype_str": _dtype_to_str(self.dtype),
+            "assign_dtype_str": (
+                None if self.assign_dtype is None else _dtype_to_str(self.assign_dtype)
+            ),
             "device_str": str(self.device),
             "fitted": self._cluster_centers is not None,
             "random_state": self.random_state.get_state(),
@@ -823,6 +861,8 @@ class MiniBatchKMeans:
         else:
             target_device = torch.device("cpu")
         dtype = _dtype_from_str(payload["dtype_str"])
+        assign_str = payload.get("assign_dtype_str")  # absent in older checkpoints
+        assign_dtype = None if assign_str is None else _dtype_from_str(assign_str)
         rng = torch.Generator(device="cpu")
         rng.set_state(payload["random_state"])
         inst = cls(
@@ -832,6 +872,7 @@ class MiniBatchKMeans:
             random_state=rng,
             device=target_device,
             dtype=dtype,
+            assign_dtype=assign_dtype,
         )
         if payload["fitted"]:
             centers = payload["cluster_centers"].to(device=target_device, dtype=dtype)
