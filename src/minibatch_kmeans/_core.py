@@ -67,7 +67,8 @@ class _BatchIndexSampler:
     and slices it into consecutive batches, keeping a smaller last batch, so
     every row is used exactly once per pass. A fractional ``max_iter`` adds a
     final partial pass over the first ``round(frac * n_samples)`` rows of a
-    new permutation.
+    new permutation. A ``max_iter`` too small for any row still trains one
+    batch, as replacement mode does.
 
     Indices are drawn with ``generator`` on its device, so they are created
     where they are used to gather rows.
@@ -94,6 +95,8 @@ class _BatchIndexSampler:
             whole = math.floor(max_iter)
             rest = round((max_iter - whole) * n_samples)
             self._epoch_rows = [n_samples] * whole + ([rest] if rest else [])
+            if not self._epoch_rows:  # tiny max_iter: still train one batch
+                self._epoch_rows = [min(batch_size, n_samples)]
             self.n_steps = sum(-(-rows // batch_size) for rows in self._epoch_rows)
 
     def __iter__(self):
@@ -385,16 +388,21 @@ class MiniBatchKMeans:
             self._counts = torch.zeros(self.n_clusters, dtype=X.dtype, device=device)
             self._n_since_last_reassign = 0
 
-    def _set_init_centroids(self, init: torch.Tensor, X: torch.Tensor) -> None:
-        """Start from user-given centers; reset ``_counts`` and the reassign counter."""
-        expected = (self.n_clusters, X.shape[1])
-        if init.dim() != 2 or tuple(init.shape) != expected:
+    def _check_init_centroids(self, init: torch.Tensor, n_features: int) -> None:
+        expected = (self.n_clusters, n_features)
+        if tuple(init.shape) != expected:
             raise ValueError(f"init_centroids must have shape {expected}, got {tuple(init.shape)}.")
         if init.dtype != self.dtype:
             raise ValueError(
                 f"init_centroids dtype {init.dtype} must match model dtype {self.dtype}."
             )
-        self._cluster_centers = init.to(self.device).clone()
+
+    def _set_init_centroids(self, init: torch.Tensor, X: torch.Tensor) -> None:
+        """Start from user-given centers; reset ``_counts`` and the reassign counter."""
+        self._check_init_centroids(init, X.shape[1])
+        # detach: centers from a tensor that requires grad must not build a
+        # graph across every training step.
+        self._cluster_centers = init.detach().to(self.device).clone()
         self._counts = torch.zeros(self.n_clusters, dtype=self.dtype, device=self.device)
         self._n_since_last_reassign = 0
 
@@ -615,7 +623,8 @@ class MiniBatchKMeans:
             them in consecutive batches (the last batch of a pass may be
             smaller), so every row is used exactly once per pass; a fractional
             ``max_iter`` ends with a partial pass over
-            ``round(frac * n_samples)`` rows of a fresh shuffle.
+            ``round(frac * n_samples)`` rows of a fresh shuffle (at least one
+            batch in total).
 
         Returns
         -------
@@ -637,6 +646,9 @@ class MiniBatchKMeans:
             raise ValueError("max_iter must be > 0.")
         if sampling not in _SAMPLING_MODES:
             raise ValueError(f"sampling must be one of {_SAMPLING_MODES}, got {sampling!r}.")
+        if init_centroids is not None and X.dim() == 2:
+            # Before the reset below, so a bad init keeps the fitted model.
+            self._check_init_centroids(init_centroids, X.shape[1])
         # fit() trains from scratch: drop old centers so a new feature width is allowed.
         self._cluster_centers = None
         self._check_input(X)
@@ -676,7 +688,8 @@ class MiniBatchKMeans:
                 if prefetcher is not None:
                     X_batch = prefetcher.next()
                 else:
-                    X_batch = X[next(indices)].to(device)
+                    # Indices live on the model's device; X may be elsewhere.
+                    X_batch = X[next(indices).to(X.device)].to(device)
 
                 centers_new, batch_inertia = self._mini_batch_step(
                     X_batch,

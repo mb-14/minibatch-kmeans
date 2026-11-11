@@ -79,6 +79,31 @@ class TestFitOptions(unittest.TestCase):
         _model().fit(X, batch_size=32, max_iter=1, init_centroids=init)
         torch.testing.assert_close(init, before)
 
+    def test_tiny_max_iter_still_trains_one_batch(self):
+        s = core._BatchIndexSampler(100, 32, 0.004, "permutation", torch.Generator().manual_seed(1))
+        batches = list(s)
+        self.assertEqual((s.n_steps, len(batches), len(batches[0])), (1, 1, 32))
+        km = _model()
+        km.fit(_blobs(), batch_size=32, max_iter=0.001, sampling="permutation")
+        self.assertEqual(km._counts.sum().item(), 32)
+
+    def test_init_centroids_requiring_grad_is_detached(self):
+        X = _blobs()
+        init = X[:4].clone().requires_grad_(True)
+        km = _model()
+        km.fit(X, batch_size=32, max_iter=1, init_centroids=init)
+        self.assertFalse(km.cluster_centers.requires_grad)
+
+    def test_bad_init_centroids_keeps_fitted_model(self):
+        X = _blobs()
+        km = _model()
+        km.fit(X, batch_size=32, max_iter=1)
+        before = km.cluster_centers.clone()
+        for bad in (X[:3], X[:4].double()):
+            with self.assertRaises(ValueError):
+                km.fit(X, init_centroids=bad)
+        torch.testing.assert_close(km.cluster_centers, before)
+
     def test_init_centroids_bad_shape_raises(self):
         X = _blobs()
         with self.assertRaises(ValueError):
@@ -186,6 +211,15 @@ class TestFitOptionsCuda(unittest.TestCase):
         labels = torch.cdist(X, init).argmin(1)
         want = torch.stack([X[labels == j].mean(0) for j in range(4)])
         torch.testing.assert_close(km.cluster_centers, want)
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 2, "needs two GPUs")
+class TestFitOptionsMultiGpu(unittest.TestCase):
+    def test_data_on_another_gpu(self):
+        X = _blobs().to("cuda:1")
+        km = _model(device="cuda:0")
+        km.fit(X, batch_size=32, max_iter=1, sampling="permutation")
+        self.assertEqual(km.cluster_centers.device, torch.device("cuda:0"))
 
 
 if __name__ == "__main__":
