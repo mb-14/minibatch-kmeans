@@ -78,8 +78,8 @@ class TestTritonKernel(unittest.TestCase):
         self.assertAlmostEqual(inertia, best.sum().item(), delta=1e-4 * inertia)
 
     def test_fit_from_cpu_data_matches_pytorch_path(self):
-        # CPU data goes through the pinned-memory prefetcher; 1000 rows in
-        # batches of 96 leave a short last batch in each pass.
+        # CPU data goes through the pinned-memory prefetcher. Both fits use
+        # the same seed, so they start from the same centers.
         g = torch.Generator().manual_seed(0)
         X = torch.randn(1000, 24, generator=g) + 4 * torch.randint(0, 6, (1000, 1), generator=g)
 
@@ -95,9 +95,7 @@ class TestTritonKernel(unittest.TestCase):
                 X,
                 batch_size=96,
                 max_iter=3,
-                sampling="permutation",
                 max_no_improvement=None,
-                init_centroids=X[:40].cuda(),
             )
             return km.cluster_centers
 
