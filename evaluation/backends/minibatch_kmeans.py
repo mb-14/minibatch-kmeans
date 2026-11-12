@@ -47,11 +47,11 @@ def run_minibatch_kmeans(
             dtype=torch.float32,
         )
 
-    # On CUDA, first-use costs are not training time: cuBLAS initialization,
-    # loading (or compiling) the Triton kernel, and, for CPU data, allocating
-    # the prefetcher's page-locked buffers, which PyTorch then reuses. Run
-    # untimed steps first: batches of the timed size against k centers, on just
-    # enough rows to seed k centers, so they take the same path as timed steps.
+    # On CUDA, first-use costs are not training time: cuBLAS initialization
+    # and, for CPU data, allocating the prefetcher's page-locked buffers, which
+    # PyTorch then reuses. Run untimed steps first: batches of the timed size
+    # against k centers, on just enough rows to seed k centers, so they take
+    # the same path as the timed steps.
     warmup_runs = 0
     if device.type == "cuda" and n >= k:
         with nvtx_range("minibatch_kmeans:backend:warmup", device):

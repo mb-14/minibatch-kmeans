@@ -33,7 +33,7 @@ On NMI, the methods again score close together on each dataset. The order differ
 
 ## Speed and memory
 
-The speed test uses a synthetic Gaussian mixture with 512 clusters and 4,096 features. Each method runs 5 iterations on 75% of the points, and only the fit is timed. minibatch-kmeans uses batches of 16,384 points and a reassignment ratio of 0.01. On a GPU, minibatch-kmeans first runs an untimed warm-up on a small slice (one step when the batch holds at least as many points as there are clusters), so the timed fit excludes cuBLAS initialization, allocating page-locked buffers for CPU data, and loading its Triton kernel when that is used. Timings from before this warm-up was added are not comparable. For flash-kmeans, the test page-locks the input matrix in CPU memory, discards two warm-up runs, and reports the mean of the next two runs.
+The speed test uses a synthetic Gaussian mixture with 512 clusters and 4,096 features. Each method runs 5 iterations on 75% of the points, and only the fit is timed. minibatch-kmeans uses batches of 16,384 points and a reassignment ratio of 0.01. On a GPU, minibatch-kmeans first runs an untimed warm-up on a small slice (one step when the batch holds at least as many points as there are clusters), so the timed fit excludes cuBLAS initialization and allocating page-locked buffers for CPU data. Timings from before this warm-up was added are not comparable. For flash-kmeans, the test page-locks the input matrix in CPU memory, discards two warm-up runs, and reports the mean of the next two runs.
 
 ![Seconds per million points at 1,048,576 points, one bar per method.](../reports/figures/xkcd/wall_vs_n.png)
 
