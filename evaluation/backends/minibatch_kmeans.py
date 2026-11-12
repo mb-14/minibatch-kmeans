@@ -35,7 +35,7 @@ def run_minibatch_kmeans(
 
     bs = batch_size if batch_size is not None else min(1024, max(1, n))
 
-    rr = 0.01 if reassignment_ratio is None else float(reassignment_ratio)
+    rr = "auto" if reassignment_ratio is None else float(reassignment_ratio)
 
     with nvtx_range("minibatch_kmeans:backend:construct", device):
         km = MiniBatchKMeans(

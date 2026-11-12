@@ -29,7 +29,7 @@ class TestMinibatchReassignmentApi(unittest.TestCase):
             self.device,
             batch_size=32,
         )
-        self.assertEqual(out["reassignment_ratio"], 0.01)
+        self.assertEqual(out["reassignment_ratio"], "auto")
         self.assertEqual(out["centroids"].shape, (self.k, self.d))
 
     def test_zero_reassignment_ratio(self) -> None:

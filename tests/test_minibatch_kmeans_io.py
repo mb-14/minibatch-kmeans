@@ -59,6 +59,7 @@ class TestMiniBatchKMeansIO(unittest.TestCase):
             km.save(path)
             loaded = MiniBatchKMeans.load(path)
 
+        self.assertEqual(loaded.reassignment_ratio, "auto")
         x = torch.randn(30, 4, dtype=torch.float32)
         self.assertTrue(torch.equal(km.predict(x), loaded.predict(x)))
 

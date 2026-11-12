@@ -9,6 +9,14 @@ from ._utils import default_cpu_generator, nvtx_range, row_sq_norms
 # Reassignment: threshold is _REASSIGN_K * n_clusters samples since last pass (empty clusters force sooner).
 _REASSIGN_K = 10
 _MAX_REASSIGN_FRAC = 0.5
+# reassignment_ratio="auto": a cluster is under-used when its count is below
+# _AUTO_COUNT_FRAC of the mean count, or when removing it would add less than
+# _AUTO_COST_FRAC of the median removal cost (see _removal_costs). The median,
+# not the mean: one far-away cluster has a huge cost and would raise a mean
+# threshold above the cost of healthy clusters.
+_AUTO_COUNT_FRAC = 0.03
+_AUTO_COST_FRAC = 0.05
+_REMOVAL_COST_CHUNK = 4096
 _DENOM_EPS = 1e-10
 _CHECKPOINT_FORMAT_VERSION = 1
 
@@ -180,6 +188,33 @@ _ASSIGNMENT_BACKENDS = ("native", "triton")
 _DEFAULT_ASSIGNMENT_BACKEND = "native"
 
 
+def _removal_costs(
+    centers: torch.Tensor, counts: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Error added by removing each center, and the index of its nearest other center.
+
+    Removing center ``j`` hands its rows to the nearest other center ``l``.
+    Merging the two clusters adds
+    ``counts[j] * counts[l] / (counts[j] + counts[l]) * |c_j - c_l|^2`` to the
+    sum of squared distances (Ward's merge cost). It is small for an empty
+    cluster and for two centers that sit close together.
+    """
+    k = centers.shape[0]
+    sq_norms = centers.square().sum(dim=1)
+    nearest = torch.empty(k, dtype=torch.int64, device=centers.device)
+    for start in range(0, k, _REMOVAL_COST_CHUNK):
+        rows = torch.arange(start, min(start + _REMOVAL_COST_CHUNK, k), device=centers.device)
+        d = torch.addmm(sq_norms, centers[rows], centers.T, beta=1, alpha=-2)
+        d.add_(sq_norms[rows, None])
+        d[rows - start, rows] = float("inf")
+        nearest[rows] = d.argmin(dim=1)
+    # The expansion above loses the distance between two nearly equal centers
+    # to rounding, so the distance to the chosen center is recomputed directly.
+    dist_sq = (centers - centers[nearest]).square().sum(dim=1)
+    paired = counts * counts[nearest] / (counts + counts[nearest]).clamp(min=_DENOM_EPS)
+    return paired * dist_sq, nearest
+
+
 class MiniBatchKMeans:
     """
     Mini-batch K-Means clustering (PyTorch).
@@ -203,7 +238,7 @@ class MiniBatchKMeans:
         *,
         verbose: int = 0,
         random_state: torch.Generator | None = None,
-        reassignment_ratio: float = 0.01,
+        reassignment_ratio: float | str = "auto",
         device: torch.device = torch.device("cpu"),
         dtype: torch.dtype = torch.float32,
         assignment_backend: str = _DEFAULT_ASSIGNMENT_BACKEND,
@@ -226,10 +261,18 @@ class MiniBatchKMeans:
             when batches are prepared on a background thread. If ``None``, a new
             generator is created with a random seed (runs are not reproducible).
 
-        **reassignment_ratio** (`float`, default ``0.01``):
-            During training, clusters whose weight is below this fraction of the
-            largest cluster weight may be re-seeded from random data points; must
-            be ``>= 0`` (``0`` disables reassignment logic).
+        **reassignment_ratio** (``"auto"`` or `float`, default ``"auto"``):
+            During training, under-used clusters may be re-seeded from random
+            data points. ``"auto"``: a cluster is under-used when its weight is
+            far below the mean cluster weight, or when removing it would add
+            little error because another center is close by (two centers
+            sharing one group of points). Both tests use only the centers and
+            their weights, so they need no row count or training budget. The
+            second test compares all pairs of centers at each check. A `float`
+            ``>= 0`` gives scikit-learn's rule instead: weight below this
+            fraction of the *largest* cluster weight. That rule needs tuning
+            per dataset, because the largest weight grows with the skew of the
+            data. ``0`` disables reassignment.
 
         **device** (`torch.device`, default ``torch.device("cpu")``):
             Device storing ``cluster_centers`` and used for distance work.
@@ -257,8 +300,12 @@ class MiniBatchKMeans:
             raise ValueError("random_state must be a torch.Generator on CPU or None.")
         else:
             self.random_state = random_state
-        if reassignment_ratio < 0:
-            raise ValueError("reassignment_ratio should be >= 0.")
+        if reassignment_ratio != "auto" and (
+            isinstance(reassignment_ratio, str) or reassignment_ratio < 0
+        ):
+            raise ValueError(
+                f'reassignment_ratio must be "auto" or a number >= 0, got {reassignment_ratio!r}.'
+            )
         self.reassignment_ratio = reassignment_ratio
         if dtype not in (torch.float32, torch.float64):
             raise ValueError(f"dtype must be torch.float32 or torch.float64, got {dtype}.")
@@ -429,20 +476,31 @@ class MiniBatchKMeans:
 
             return False
 
-    def _random_reassign(self, batch_size: int) -> bool:
-        self._n_since_last_reassign += batch_size
-        reassign_thresh = _REASSIGN_K * self.n_clusters
-        if (self._counts == 0).any().item() or self._n_since_last_reassign >= reassign_thresh:
-            self._n_since_last_reassign = 0
-            return True
-        return False
+    def _under_used(self, centers: torch.Tensor, periodic: bool) -> torch.Tensor:
+        """Mask of the clusters that ``reassignment_ratio`` marks for reassignment."""
+        counts = self._counts
+        if self.reassignment_ratio != "auto":
+            return counts < self.reassignment_ratio * counts.max()
+        under_used = counts < _AUTO_COUNT_FRAC * counts.mean()
+        if not periodic:
+            # A check forced by an empty cluster skips the pairwise search.
+            return under_used
+        cost, nearest = _removal_costs(centers, counts)
+        cheap = cost < _AUTO_COST_FRAC * cost.median()
+        # Two centers that are each other's nearest have the same cost. Removing
+        # one makes the other worth keeping, so the cheaper of a marked pair goes
+        # first (lower index on a tie) and the other stays.
+        index = torch.arange(len(cost), device=cost.device)
+        nearest_goes_first = (cost[nearest] < cost) | ((cost[nearest] == cost) & (nearest < index))
+        return under_used | (cheap & ~(cheap[nearest] & nearest_goes_first))
 
     def _maybe_reassign_centers(self, X: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
         """Replace under-used cluster centers with random points from this minibatch.
 
-        When `_random_reassign` allows it (empty clusters or periodic refresh) and
-        ``reassignment_ratio > 0``, clusters with weight below
-        ``reassignment_ratio * max(weight)`` are candidates. Those center rows are
+        A check runs when some cluster is empty, or every
+        ``_REASSIGN_K * n_clusters`` rows (periodic). Unless
+        ``reassignment_ratio`` is ``0``, the clusters that `_under_used` marks
+        are candidates. Those center rows are
         replaced with random rows from ``X`` in a **new** tensor; the input
         ``centers`` tensor is not modified. ``self._counts`` is adjusted for
         reassigned clusters so the next updates stay balanced.
@@ -459,11 +517,15 @@ class MiniBatchKMeans:
         torch.Tensor
             Centers after any reassignment; same object as input if none.
         """
-        random_reassign = self._random_reassign(X.shape[0])
-        if not random_reassign or self.reassignment_ratio <= 0:
+        self._n_since_last_reassign += X.shape[0]
+        periodic = self._n_since_last_reassign >= _REASSIGN_K * self.n_clusters
+        if not periodic and not (self._counts == 0).any().item():
+            return centers
+        self._n_since_last_reassign = 0
+        if self.reassignment_ratio == 0:
             return centers
 
-        to_reassign = self._counts < self.reassignment_ratio * self._counts.max()
+        to_reassign = self._under_used(centers, periodic)
         n_to_reassign = to_reassign.sum().item()
 
         batch_size = X.shape[0]
@@ -883,10 +945,11 @@ class MiniBatchKMeans:
         dtype = _dtype_from_str(payload["dtype_str"])
         rng = torch.Generator(device="cpu")
         rng.set_state(payload["random_state"])
+        ratio = payload["reassignment_ratio"]
         inst = cls(
             n_clusters=int(payload["n_clusters"]),
             verbose=verbose,
-            reassignment_ratio=float(payload["reassignment_ratio"]),
+            reassignment_ratio=ratio if ratio == "auto" else float(ratio),
             random_state=rng,
             device=target_device,
             dtype=dtype,
