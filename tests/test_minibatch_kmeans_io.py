@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,7 +35,6 @@ class TestMiniBatchKMeansIO(unittest.TestCase):
             loaded = MiniBatchKMeans.load(path)
 
         self.assertEqual(loaded.n_clusters, km.n_clusters)
-        self.assertEqual(loaded.verbose, km.verbose)
         self.assertEqual(loaded.reassignment_ratio, km.reassignment_ratio)
         self.assertEqual(loaded.dtype, km.dtype)
         self.assertTrue(torch.allclose(loaded.cluster_centers, km.cluster_centers))
@@ -82,24 +83,37 @@ class TestMiniBatchKMeansIO(unittest.TestCase):
                 MiniBatchKMeans.load(path)
             self.assertIn("format_version", str(ctx.exception).lower())
 
-    def _save_fitted(self, td: str, saved_device: str | None = None) -> tuple[Path, torch.Tensor]:
-        """Save a small fitted CPU model; optionally relabel its saved device."""
+    def _save_fitted(self, td: str, **legacy_fields: object) -> tuple[Path, torch.Tensor]:
+        """Save a small fitted CPU model; optionally add fields older versions wrote."""
         x = torch.randn(50, 3)
-        km = MiniBatchKMeans(n_clusters=3)
-        km.fit(x, batch_size=16, max_iter=1, max_no_improvement=None)
+        km = MiniBatchKMeans(n_clusters=3, verbose=1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            km.fit(x, batch_size=16, max_iter=1, max_no_improvement=None)
         path = Path(td) / "m.pt"
         km.save(path)
-        if saved_device is not None:
+        if legacy_fields:
             payload = torch.load(path, weights_only=False)
-            payload["device_str"] = saved_device
+            payload.update(legacy_fields)
             torch.save(payload, path)
         return path, x
 
-    def test_load_defaults_to_cpu_not_saved_device(self) -> None:
-        # Runs without CUDA: a checkpoint that claims it was saved on CUDA.
+    def test_machine_settings_are_not_saved(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            path, x = self._save_fitted(td, saved_device="cuda:0")
+            path, _ = self._save_fitted(td)
+            payload = torch.load(path, weights_only=False)
             loaded = MiniBatchKMeans.load(path)
+            noisy = MiniBatchKMeans.load(path, verbose=1)
+        self.assertNotIn("verbose", payload)
+        self.assertNotIn("device_str", payload)
+        self.assertFalse(loaded.verbose)  # the saved model had verbose=1
+        self.assertTrue(noisy.verbose)
+
+    def test_load_ignores_legacy_machine_fields(self) -> None:
+        # Runs without CUDA: an old checkpoint saved on CUDA with verbose=1.
+        with tempfile.TemporaryDirectory() as td:
+            path, x = self._save_fitted(td, device_str="cuda:0", verbose=True)
+            loaded = MiniBatchKMeans.load(path)
+        self.assertFalse(loaded.verbose)
         self.assertEqual(loaded.device.type, "cpu")
         self.assertEqual(loaded.cluster_centers.device.type, "cpu")
         self.assertEqual(loaded._counts.device.type, "cpu")

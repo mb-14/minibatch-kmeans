@@ -112,11 +112,6 @@ km2 = MiniBatchKMeans.load("kmeans.pt")  # loads on CPU
 km_gpu = MiniBatchKMeans.load("kmeans.pt", device=torch.device("cuda"))  # loads on a GPU
 ```
 
-The checkpoint stores the model, not where it runs: `load` puts it on the CPU with the PyTorch backend unless you pass `device` and `assignment_backend`.
-
-> [!WARNING]
-> `load` uses `torch.load` without `weights_only`, so it can run code stored in the file. Load only files you trust.
-
 ## Benchmarks
 
 See [evaluation/README.md](evaluation/README.md).
