@@ -29,6 +29,18 @@ You need Python 3.10 or newer. Install a PyTorch 2.x build for your machine firs
 pip install minibatch-kmeans
 ```
 
+That is the minimal install: everything runs on plain PyTorch, on CPU or GPU.
+
+### With the Triton kernel (optional)
+
+On an NVIDIA GPU, the step that assigns points to their nearest centers can run as one fused [Triton](https://github.com/triton-lang/triton) kernel instead. It is off unless you turn it on; see [Use the Triton kernel](#use-the-triton-kernel) for what it does and how to enable it.
+
+It needs Linux, an NVIDIA GPU, PyTorch 2.4 or newer, and Triton 3.0 or newer. PyTorch's Linux CUDA builds already install a matching Triton, so with PyTorch 2.4+ there is usually nothing to add. To state the requirement explicitly:
+
+```bash
+pip install "minibatch-kmeans[triton]"
+```
+
 ## Quick start
 
 ### Fit a tensor
@@ -58,6 +70,26 @@ km = MiniBatchKMeans(n_clusters=8, device=torch.device("cuda"))
 labels = km.fit_predict(X.cuda(), batch_size=256)
 ```
 
+### Use the Triton kernel
+
+With the [optional kernel](#with-the-triton-kernel-optional) available, choose it when you create the model:
+
+```python
+X = torch.randn(100_000, 64, device="cuda")
+
+km = MiniBatchKMeans(n_clusters=256, device=torch.device("cuda"), assignment_backend="triton")
+km.fit(X, batch_size=16384, max_iter=5)
+```
+
+The kernel handles `torch.float32` data only.
+
+| `assignment_backend` | Behavior |
+| --- | --- |
+| `"native"` (default) | Always PyTorch. |
+| `"triton"` | Always the kernel. Raises an error that says why if it cannot run. |
+
+Both backends give the same results up to floating-point rounding: a point almost exactly between two centers may be assigned to either. The first use in a process takes a moment while the kernel loads.
+
 ### Incremental training
 
 `partial_fit` updates the centers with every row of the batch you pass in.
@@ -79,6 +111,8 @@ km.save("kmeans.pt")
 km2 = MiniBatchKMeans.load("kmeans.pt")  # loads on CPU
 km_gpu = MiniBatchKMeans.load("kmeans.pt", device=torch.device("cuda"))  # loads on a GPU
 ```
+
+The checkpoint stores the model, not where it runs: `load` puts it on the CPU with the PyTorch backend unless you pass `device` and `assignment_backend`.
 
 > [!WARNING]
 > `load` uses `torch.load` without `weights_only`, so it can run code stored in the file. Load only files you trust.
