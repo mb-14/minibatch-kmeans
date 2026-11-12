@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-from ._utils import default_cpu_generator, nvtx_range
+from ._utils import default_cpu_generator, nvtx_range, row_sq_norms
 
 # Reassignment: threshold is _REASSIGN_K * n_clusters samples since last pass (empty clusters force sooner).
 _REASSIGN_K = 10
@@ -171,9 +171,13 @@ def _pairwise_squared_distances(X: torch.Tensor, C: torch.Tensor) -> torch.Tenso
     The row norms use one reduction each, and the cross term is a single
     matrix product. That avoids a squared copy of ``X`` and a doubled copy of ``X``.
     """
-    x_sq = torch.linalg.vector_norm(X, ord=2, dim=1, keepdim=True).square()
-    c_sq = torch.linalg.vector_norm(C, ord=2, dim=1).square()
+    x_sq = row_sq_norms(X, keepdim=True)
+    c_sq = row_sq_norms(C)
     return torch.addmm(c_sq, X, C.T, beta=1, alpha=-2).add_(x_sq)
+
+
+_ASSIGNMENT_BACKENDS = ("native", "triton")
+_DEFAULT_ASSIGNMENT_BACKEND = "native"
 
 
 class MiniBatchKMeans:
@@ -202,6 +206,7 @@ class MiniBatchKMeans:
         reassignment_ratio: float = 0.01,
         device: torch.device = torch.device("cpu"),
         dtype: torch.dtype = torch.float32,
+        assignment_backend: str = _DEFAULT_ASSIGNMENT_BACKEND,
     ):
         """
         Parameters
@@ -234,6 +239,15 @@ class MiniBatchKMeans:
             dtype. Must be ``torch.float32`` or ``torch.float64``: in half
             precision the running counts overflow and small center updates
             round away, so convert half-precision data with ``X.float()``.
+
+        **assignment_backend** (`str`, default ``"native"``):
+            How rows are assigned to centers in ``fit``, ``partial_fit`` and
+            ``predict``. ``"native"``: PyTorch, which builds the
+            ``(batch, n_clusters)`` distance matrix. ``"triton"``: a fused
+            kernel that never stores that matrix. It needs Triton 3.0 or
+            newer, and raises ``RuntimeError`` unless the model is on CUDA
+            with ``torch.float32``. Results agree up to floating-point
+            summation order.
         """
         self.n_clusters = n_clusters
         self.verbose = bool(verbose)
@@ -250,7 +264,22 @@ class MiniBatchKMeans:
             raise ValueError(f"dtype must be torch.float32 or torch.float64, got {dtype}.")
         self.device = device
         self.dtype = dtype
+        self.assignment_backend = assignment_backend
         self._cluster_centers: torch.Tensor | None = None
+
+    @property
+    def assignment_backend(self) -> str:
+        """``"native"`` or ``"triton"``; see the constructor."""
+        # Objects pickled before this option existed have no such attribute.
+        return getattr(self, "_assignment_backend", _DEFAULT_ASSIGNMENT_BACKEND)
+
+    @assignment_backend.setter
+    def assignment_backend(self, value: str) -> None:
+        if value not in _ASSIGNMENT_BACKENDS:
+            raise ValueError(
+                f"assignment_backend must be one of {_ASSIGNMENT_BACKENDS}, got {value!r}."
+            )
+        self._assignment_backend = value
 
     @property
     def cluster_centers(self) -> torch.Tensor:
@@ -291,7 +320,15 @@ class MiniBatchKMeans:
             ``return_inertia`` is false.
         """
         with nvtx_range("minibatch_kmeans:_labels_inertia", X.device):
-            dist_sq = _pairwise_squared_distances(X, self._cluster_centers)
+            C = self._cluster_centers
+            fused = self._fused_assign(X, C)
+            if fused is not None:
+                partial, labels = fused
+                if not return_inertia:
+                    return labels, None
+                return labels, partial.add_(row_sq_norms(X)).sum().item()
+
+            dist_sq = _pairwise_squared_distances(X, C)
             labels = dist_sq.argmin(dim=1)
 
             if not return_inertia:
@@ -300,6 +337,19 @@ class MiniBatchKMeans:
             # Reuse E-step distances: inertia = sum_i dist_sq[i, labels[i]]
             inertia = dist_sq.gather(1, labels.unsqueeze(1)).squeeze(1).sum().item()
             return labels, inertia
+
+    def _fused_assign(
+        self, X: torch.Tensor, C: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """``(partial, labels)`` from the fused kernel under ``"triton"``, else ``None``."""
+        if self.assignment_backend != "triton":
+            return None
+        from . import _triton_assign as fused  # only "triton" imports Triton
+
+        reason = fused.unsupported_reason(X, C)
+        if reason is not None:
+            raise RuntimeError(f'assignment_backend="triton" cannot run: {reason}.')
+        return fused.nearest_centroid(X, C)
 
     def _check_input(self, X: torch.Tensor, predict: bool = False) -> None:
         """Validate ``X``; once fitted, its column count must match the centers."""
@@ -773,6 +823,7 @@ class MiniBatchKMeans:
         *,
         map_location: str | torch.device | None = None,
         device: torch.device | None = None,
+        assignment_backend: str = _DEFAULT_ASSIGNMENT_BACKEND,
     ) -> "MiniBatchKMeans":
         """Load an estimator previously written with :meth:`save`.
 
@@ -792,6 +843,11 @@ class MiniBatchKMeans:
             If set, move ``cluster_centers`` and ``counts`` to this device and use
             it as the model device. Default: the ``map_location`` device (CPU),
             not the device the model was saved from.
+
+        **assignment_backend** (`str`, default ``"native"``):
+            Backend of the loaded model. Like ``device``, it describes the
+            machine the model runs on, not the model, so it is not stored in
+            the checkpoint: pass it again when you want the kernel.
 
         Returns
         -------
@@ -832,6 +888,7 @@ class MiniBatchKMeans:
             random_state=rng,
             device=target_device,
             dtype=dtype,
+            assignment_backend=assignment_backend,
         )
         if payload["fitted"]:
             centers = payload["cluster_centers"].to(device=target_device, dtype=dtype)

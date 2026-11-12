@@ -9,6 +9,11 @@ from contextlib import contextmanager
 import torch
 
 
+def row_sq_norms(t: torch.Tensor, keepdim: bool = False) -> torch.Tensor:
+    """Squared Euclidean norm of each row."""
+    return torch.linalg.vector_norm(t, ord=2, dim=1, keepdim=keepdim).square()
+
+
 def default_cpu_generator() -> torch.Generator:
     g = torch.Generator(device="cpu")
     g.manual_seed(secrets.randbits(64))

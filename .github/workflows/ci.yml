@@ -49,3 +49,49 @@ jobs:
 
       - name: Run tests
         run: python -m pytest -q -rs
+
+      # In a fresh environment, so the resolve is not already satisfied by the
+      # packages installed above: the extra must bring in Triton.
+      - name: The triton extra resolves
+        run: |
+          uv venv --quiet /tmp/extra-env
+          VIRTUAL_ENV=/tmp/extra-env uv pip install --dry-run --torch-backend cpu -e ".[triton]" 2>&1 | tee /tmp/extra.log
+          grep -q "+ triton==" /tmp/extra.log
+
+  # The runners have no GPU, so the kernel's logic runs on the CPU through
+  # Triton's interpreter.
+  kernel:
+    name: kernel (Triton ${{ matrix.triton }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        triton: ["3.6.0", "3.9.0"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          activate-environment: true
+
+      # numpy < 2.3: Triton's interpreter converts 1-element arrays to scalars,
+      # which NumPy 2.3+ rejects.
+      - name: Install dependencies
+        run: |
+          uv pip install --torch-backend cpu -e . pytest "numpy<2.3" torch
+          uv pip install --no-deps "triton==${{ matrix.triton }}"
+
+      # Without this, a Triton that fails to import would skip every kernel
+      # test and the job would still pass.
+      - name: Triton imports
+        run: python -c "import triton; print(triton.__version__)"
+
+      - name: Backend tests (Triton installed, no GPU)
+        run: python -m pytest -q -rs tests/test_triton_assign.py
+
+      - name: Kernel logic on CPU (Triton interpreter)
+        env:
+          TRITON_INTERPRET: "1"
+        run: python -m pytest -q -rs -W ignore::DeprecationWarning tests/test_triton_assign.py
