@@ -790,7 +790,9 @@ class MiniBatchKMeans:
         """Serialize the estimator to ``path`` via :func:`torch.save`.
 
         Saves hyperparameters, CPU copies of learned tensors (if fitted), and
-        the CPU ``random_state``. Checkpoints are intended for **trusted** use
+        the CPU ``random_state``. Settings that describe the machine or the run
+        rather than the model (``device``, ``assignment_backend``, ``verbose``)
+        are not saved; pass them to :meth:`load`. Checkpoints are intended for **trusted** use
         only (same caveat as :func:`torch.load` with ``weights_only=False``).
 
         Parameters
@@ -803,10 +805,8 @@ class MiniBatchKMeans:
         payload: dict = {
             "format_version": _CHECKPOINT_FORMAT_VERSION,
             "n_clusters": self.n_clusters,
-            "verbose": self.verbose,
             "reassignment_ratio": self.reassignment_ratio,
             "dtype_str": _dtype_to_str(self.dtype),
-            "device_str": str(self.device),
             "fitted": self._cluster_centers is not None,
             "random_state": self.random_state.get_state(),
         }
@@ -824,6 +824,7 @@ class MiniBatchKMeans:
         map_location: str | torch.device | None = None,
         device: torch.device | None = None,
         assignment_backend: str = _DEFAULT_ASSIGNMENT_BACKEND,
+        verbose: int = 0,
     ) -> "MiniBatchKMeans":
         """Load an estimator previously written with :meth:`save`.
 
@@ -848,6 +849,11 @@ class MiniBatchKMeans:
             Backend of the loaded model. Like ``device``, it describes the
             machine the model runs on, not the model, so it is not stored in
             the checkpoint: pass it again when you want the kernel.
+
+        **verbose** (`int`, default ``0``):
+            Verbosity of the loaded model. A logging preference, so it is not
+            stored in the checkpoint either. Older checkpoints that contain
+            ``verbose`` (or ``device_str``) still load; both fields are ignored.
 
         Returns
         -------
@@ -883,7 +889,7 @@ class MiniBatchKMeans:
         rng.set_state(payload["random_state"])
         inst = cls(
             n_clusters=int(payload["n_clusters"]),
-            verbose=bool(payload["verbose"]),
+            verbose=verbose,
             reassignment_ratio=float(payload["reassignment_ratio"]),
             random_state=rng,
             device=target_device,
