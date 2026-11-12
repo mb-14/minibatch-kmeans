@@ -790,9 +790,7 @@ class MiniBatchKMeans:
         """Serialize the estimator to ``path`` via :func:`torch.save`.
 
         Saves hyperparameters, CPU copies of learned tensors (if fitted), and
-        the CPU ``random_state``. Settings that describe the machine or the run
-        rather than the model (``device``, ``assignment_backend``, ``verbose``)
-        are not saved; pass them to :meth:`load`. Checkpoints are intended for **trusted** use
+        the CPU ``random_state``. Checkpoints are intended for **trusted** use
         only (same caveat as :func:`torch.load` with ``weights_only=False``).
 
         Parameters
@@ -851,9 +849,7 @@ class MiniBatchKMeans:
             the checkpoint: pass it again when you want the kernel.
 
         **verbose** (`int`, default ``0``):
-            Verbosity of the loaded model. A logging preference, so it is not
-            stored in the checkpoint either. Older checkpoints that contain
-            ``verbose`` (or ``device_str``) still load; both fields are ignored.
+            Verbosity of the loaded model.
 
         Returns
         -------
