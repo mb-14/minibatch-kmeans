@@ -19,7 +19,7 @@ def run_minibatch_kmeans(
     device: torch.device,
     batch_size: int | None = None,
     *,
-    reassignment_ratio: float | None = None,
+    reassign_centers: bool = True,
 ) -> dict[str, Any]:
     with nvtx_range("minibatch_kmeans:backend:as_tensor", device):
         x = torch.as_tensor(x, dtype=torch.float32)
@@ -35,14 +35,12 @@ def run_minibatch_kmeans(
 
     bs = batch_size if batch_size is not None else min(1024, max(1, n))
 
-    rr = 0.01 if reassignment_ratio is None else float(reassignment_ratio)
-
     with nvtx_range("minibatch_kmeans:backend:construct", device):
         km = MiniBatchKMeans(
             n_clusters=k,
             verbose=False,
             random_state=rng,
-            reassignment_ratio=rr,
+            reassign_centers=reassign_centers,
             device=device,
             dtype=torch.float32,
         )
@@ -64,5 +62,5 @@ def run_minibatch_kmeans(
         "cpu_time_s": cpu_s,
         "timing_epochs": max(1, niter),
         "batch_size": int(min(bs, n)),
-        "reassignment_ratio": rr,
+        "reassign_centers": reassign_centers,
     }

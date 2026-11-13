@@ -21,7 +21,7 @@ The datasets are listed in [`presets.py`](presets.py):
 | `digits` | 70,000 | 719 | Flattened MNIST digits |
 | `fashion` | 70,000 | 784 | Flattened Fashion-MNIST images |
 
-minibatch-kmeans uses batches of 16,384 points and a reassignment ratio of 0.1. The reassignment ratio controls when small clusters are moved to new starting points. Every method uses the same number of iterations on a given dataset.
+minibatch-kmeans uses batches of 16,384 points. The charts were made with version 0.1.2, which moved the centers of small clusters using a reassignment ratio of 0.1; later versions decide this from the data and take no ratio. Every method uses the same number of iterations on a given dataset.
 
 ![Adjusted Rand index per dataset. Each bar is the mean of a method's best score over three runs.](../reports/figures/xkcd/quality_ari.png)
 
@@ -33,7 +33,7 @@ On NMI, the methods again score close together on each dataset. The order differ
 
 ## Speed and memory
 
-The speed test uses a synthetic Gaussian mixture with 512 clusters and 4,096 features. Each method runs 5 iterations on 75% of the points, and only the fit is timed. minibatch-kmeans uses batches of 16,384 points and a reassignment ratio of 0.01. For flash-kmeans, the test page-locks the input matrix in CPU memory, discards two warm-up runs, and reports the mean of the next two runs.
+The speed test uses a synthetic Gaussian mixture with 512 clusters and 4,096 features. Each method runs 5 iterations on 75% of the points, and only the fit is timed. minibatch-kmeans uses batches of 16,384 points (and, in version 0.1.2, which made the chart, a reassignment ratio of 0.01). For flash-kmeans, the test page-locks the input matrix in CPU memory, discards two warm-up runs, and reports the mean of the next two runs.
 
 ![Seconds per million points at 1,048,576 points, one bar per method.](../reports/figures/xkcd/wall_vs_n.png)
 
@@ -74,7 +74,6 @@ You need a CUDA GPU and [conda](https://docs.conda.io/). Run every command from 
      --device cuda:0 \
      --methods minibatchkmeans flashkmeans fastkmeans faisskmeans \
      --batch-size 16384 \
-     --reassignment-ratio 0.1 \
      --n-trials 3 \
      -o results_eval.json
    ```
@@ -92,7 +91,6 @@ You need a CUDA GPU and [conda](https://docs.conda.io/). Run every command from 
      --niter 5 \
      --method minibatchkmeans \
      --batch-size 16384 \
-     --reassignment-ratio 0.01 \
      -o results.json
    ```
 

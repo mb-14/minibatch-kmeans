@@ -30,7 +30,7 @@
     {#
     Same as default, but omit MiniBatchKMeans constructor-mirrored attributes from the public API surface.
     #}
-    {% if doc.kind == "variable" and doc.name in ["n_clusters", "verbose", "random_state", "reassignment_ratio", "device", "dtype"] %}
+    {% if doc.kind == "variable" and doc.name in ["n_clusters", "verbose", "random_state", "reassign_centers", "device", "dtype"] %}
     {% elif "@private" in doc.docstring %}
     {% elif "@public" in doc.docstring %}
         true
