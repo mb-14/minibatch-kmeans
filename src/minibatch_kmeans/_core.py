@@ -24,9 +24,14 @@ _AUTO_GAIN_FRAC = 0.01
 # new center move this fraction of the way from the donor's mean toward one of
 # the donor's rows, in opposite directions.
 _AUTO_SPLIT_STEP = 0.1
+# Rows per block of the pairwise search in _removal_costs, and the most bytes a
+# block may take (the row count shrinks above k = 65536 in float32).
 _REMOVAL_COST_CHUNK = 4096
+_REMOVAL_COST_BYTES = 1 << 30
 _DENOM_EPS = 1e-10
-_CHECKPOINT_FORMAT_VERSION = 1
+# Version 2 added reassignment_ratio="auto"; version 1 files still load.
+_CHECKPOINT_FORMAT_VERSION = 2
+_READABLE_CHECKPOINT_VERSIONS = (1, 2)
 
 
 def _dtype_to_str(dt: torch.dtype) -> str:
@@ -210,12 +215,16 @@ def _removal_costs(
     k = centers.shape[0]
     sq_norms = centers.square().sum(dim=1)
     nearest = torch.empty(k, dtype=torch.int64, device=centers.device)
-    for start in range(0, k, _REMOVAL_COST_CHUNK):
-        rows = torch.arange(start, min(start + _REMOVAL_COST_CHUNK, k), device=centers.device)
-        d = torch.addmm(sq_norms, centers[rows], centers.T, beta=1, alpha=-2)
-        d.add_(sq_norms[rows, None])
-        d[rows - start, rows] = float("inf")
-        nearest[rows] = d.argmin(dim=1)
+    # Each chunk holds a (rows, k) distance block; fewer rows at large k keep it
+    # within the byte budget.
+    chunk = max(1, min(_REMOVAL_COST_CHUNK, _REMOVAL_COST_BYTES // (k * centers.element_size())))
+    for start in range(0, k, chunk):
+        end = min(start + chunk, k)
+        d = torch.addmm(sq_norms, centers[start:end], centers.T, beta=1, alpha=-2)
+        d.add_(sq_norms[start:end, None])
+        d.diagonal(start).fill_(float("inf"))
+        nearest[start:end] = d.argmin(dim=1)
+        del d  # or the next block is allocated while this one is still held
     # The expansion above loses the distance between two nearly equal centers
     # to rounding, so the distance to the chosen center is recomputed directly.
     dist_sq = (centers - centers[nearest]).square().sum(dim=1)
@@ -1002,10 +1011,10 @@ class MiniBatchKMeans:
         path = Path(path)
         payload = torch.load(path, map_location=map_location or "cpu", weights_only=False)
         version = payload.get("format_version")
-        if version != _CHECKPOINT_FORMAT_VERSION:
+        if version not in _READABLE_CHECKPOINT_VERSIONS:
             raise ValueError(
                 f"Unsupported checkpoint format_version={version!r}; "
-                f"expected {_CHECKPOINT_FORMAT_VERSION}."
+                f"expected one of {_READABLE_CHECKPOINT_VERSIONS}."
             )
         if device is not None:
             target_device = device

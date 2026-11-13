@@ -84,6 +84,21 @@ class TestMiniBatchKMeansIO(unittest.TestCase):
                 MiniBatchKMeans.load(path)
             self.assertIn("format_version", str(ctx.exception).lower())
 
+    def test_version_1_checkpoint_with_a_numeric_ratio_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path, x = self._save_fitted(td, format_version=1, reassignment_ratio=0.05)
+            loaded = MiniBatchKMeans.load(path)
+        self.assertEqual(loaded.reassignment_ratio, 0.05)
+        self.assertEqual(loaded.predict(x).shape, (50,))
+
+    def test_auto_is_saved_under_a_version_older_releases_reject(self) -> None:
+        # Older releases read only version 1 and cannot parse "auto".
+        with tempfile.TemporaryDirectory() as td:
+            path, _ = self._save_fitted(td)
+            payload = torch.load(path, weights_only=False)
+        self.assertEqual(payload["reassignment_ratio"], "auto")
+        self.assertGreater(payload["format_version"], 1)
+
     def _save_fitted(self, td: str, **legacy_fields: object) -> tuple[Path, torch.Tensor]:
         """Save a small fitted CPU model; optionally add fields older versions wrote."""
         x = torch.randn(50, 3)

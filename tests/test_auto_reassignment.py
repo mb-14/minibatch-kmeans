@@ -1,10 +1,11 @@
 """reassignment_ratio="auto": which clusters are marked, and where their centers go."""
 
 import unittest
+from unittest import mock
 
 import torch
 
-from minibatch_kmeans import MiniBatchKMeans
+from minibatch_kmeans import MiniBatchKMeans, _core
 
 
 def _model(counts: list[float], ratio, centers=None) -> tuple[MiniBatchKMeans, torch.Tensor]:
@@ -127,6 +128,19 @@ class TestAutoReassignment(unittest.TestCase):
             km.fit(X, batch_size=256, max_iter=5, tol=0.0, max_no_improvement=None)
             fits.append(km.cluster_centers)
         torch.testing.assert_close(fits[0], fits[1], rtol=0, atol=0)
+
+    def test_removal_costs_do_not_depend_on_the_block_size(self) -> None:
+        torch.manual_seed(0)
+        centers = torch.randn(300, 5, dtype=torch.float64)
+        counts = torch.rand(300, dtype=torch.float64) * 100
+        dist = torch.cdist(centers, centers).fill_diagonal_(float("inf"))
+        expected = dist.argmin(dim=1)
+        for budget in (1 << 30, 300 * 8 * 7, 1):  # all rows, 7 rows, 1 row per block
+            with mock.patch.object(_core, "_REMOVAL_COST_BYTES", budget):
+                cost, nearest = _core._removal_costs(centers, counts)
+            self.assertEqual(nearest.tolist(), expected.tolist(), budget)
+            paired = counts * counts[expected] / (counts + counts[expected])
+            torch.testing.assert_close(cost, paired * dist.min(dim=1).values ** 2)
 
     def test_zero_disables(self) -> None:
         self.assertEqual(_reassigned(*_model([100.0, 0.0, 100.0], 0)), [])
