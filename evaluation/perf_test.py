@@ -189,7 +189,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=non_negative_float,
         default=0.01,
         metavar="R",
-        help="reassignment_ratio for minibatchkmeans and sklearnminibatchkmeans (default: 0.01)",
+        help="reassignment_ratio for sklearnminibatchkmeans (default: 0.01)",
     )
     p.add_argument(
         "--eval-quality",
@@ -281,7 +281,6 @@ def _run_backend(
             seed,
             dev,
             batch_size=batch_size,
-            reassignment_ratio=reassignment_ratio,
         )
     if method == SKLEARNKMEANS:
         return run_sklearn_kmeans(x_train, k, niter, seed, dev)

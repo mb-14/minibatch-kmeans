@@ -184,7 +184,7 @@ class TestKernelCuda(KernelTestCase):
         def fit(backend):
             km = MiniBatchKMeans(
                 40,
-                reassignment_ratio=0.0,
+                reassign_centers=False,
                 device=torch.device("cuda"),
                 random_state=torch.Generator().manual_seed(0),
                 assignment_backend=backend,

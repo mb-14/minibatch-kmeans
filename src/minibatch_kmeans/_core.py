@@ -1,5 +1,6 @@
 import queue
 import threading
+import warnings
 from pathlib import Path
 
 import torch
@@ -9,7 +10,7 @@ from ._utils import default_cpu_generator, nvtx_range, row_sq_norms
 # Reassignment: threshold is _REASSIGN_K * n_clusters samples since last pass (empty clusters force sooner).
 _REASSIGN_K = 10
 _MAX_REASSIGN_FRAC = 0.5
-# reassignment_ratio="auto": a cluster is under-used when its count is below
+# Reassignment (reassign_centers=True): a cluster is under-used when its count is below
 # _AUTO_COUNT_FRAC of the mean count, or when removing it would add little
 # error (see _removal_costs): less than _AUTO_COST_FRAC of the median removal
 # cost, or less than _AUTO_GAIN_FRAC of the error an average cluster holds.
@@ -29,8 +30,9 @@ _AUTO_SPLIT_STEP = 0.1
 _REMOVAL_COST_CHUNK = 4096
 _REMOVAL_COST_BYTES = 1 << 30
 _DENOM_EPS = 1e-10
-# A checkpoint is version 2 when reassignment_ratio is "auto", which version 1
-# readers cannot parse, and version 1 otherwise, so older releases still load it.
+# Version 2 stores reassign_centers. Version 1 stored reassignment_ratio, which
+# load() maps to it.
+_CHECKPOINT_FORMAT_VERSION = 2
 _READABLE_CHECKPOINT_VERSIONS = (1, 2)
 
 
@@ -269,10 +271,11 @@ class MiniBatchKMeans:
         *,
         verbose: int = 0,
         random_state: torch.Generator | None = None,
-        reassignment_ratio: float | str = "auto",
+        reassign_centers: bool = True,
         device: torch.device = torch.device("cpu"),
         dtype: torch.dtype = torch.float32,
         assignment_backend: str = _DEFAULT_ASSIGNMENT_BACKEND,
+        reassignment_ratio: float | str | None = None,
     ):
         """
         Parameters
@@ -292,21 +295,16 @@ class MiniBatchKMeans:
             when batches are prepared on a background thread. If ``None``, a new
             generator is created with a random seed (runs are not reproducible).
 
-        **reassignment_ratio** (``"auto"`` or `float`, default ``"auto"``):
-            During training, the centers of under-used clusters are moved.
-            ``"auto"``: a cluster is under-used when its weight is far below
-            the mean cluster weight, or when removing it would add little
-            error because another center is close by (two centers sharing one
-            group of points). The tests use the centers, their weights and the
-            current minibatch, so they need no row count or training budget.
-            The second test compares all pairs of centers at each check. An
-            under-used center is moved next to a cluster with a large error in
-            the current minibatch, and the two share that cluster. A `float`
-            ``>= 0`` gives scikit-learn's rule instead: weight below this
-            fraction of the *largest* cluster weight, and the center moves to
-            a random row. That rule needs tuning per dataset, because the
-            largest weight grows with the skew of the data. ``0`` disables
-            reassignment.
+        **reassign_centers** (`bool`, default ``True``):
+            Move the centers of under-used clusters during training. A cluster
+            is under-used when its weight is far below the mean cluster weight,
+            or when removing it would add little error because another center
+            is close by (two centers sharing one group of points). The tests
+            use the centers, their weights and the current minibatch, so they
+            need no row count or training budget. The second test compares all
+            pairs of centers at each check. An under-used center is moved next
+            to a cluster with a large error in the current minibatch, and the
+            two share that cluster. ``False`` never moves a center this way.
 
         **device** (`torch.device`, default ``torch.device("cpu")``):
             Device storing ``cluster_centers`` and used for distance work.
@@ -325,6 +323,12 @@ class MiniBatchKMeans:
             newer, and raises ``RuntimeError`` unless the model is on CUDA
             with ``torch.float32``. Results agree up to floating-point
             summation order.
+
+        **reassignment_ratio** (deprecated):
+            Ignored. Earlier versions took a number here (scikit-learn's
+            threshold) or ``"auto"``. Passing any value warns and has no
+            effect, including ``0``, which used to disable reassignment: use
+            ``reassign_centers=False`` for that.
         """
         self.n_clusters = n_clusters
         self.verbose = bool(verbose)
@@ -334,13 +338,16 @@ class MiniBatchKMeans:
             raise ValueError("random_state must be a torch.Generator on CPU or None.")
         else:
             self.random_state = random_state
-        if reassignment_ratio != "auto" and (
-            isinstance(reassignment_ratio, str) or reassignment_ratio < 0
-        ):
-            raise ValueError(
-                f'reassignment_ratio must be "auto" or a number >= 0, got {reassignment_ratio!r}.'
+        if not isinstance(reassign_centers, bool):
+            raise ValueError(f"reassign_centers must be True or False, got {reassign_centers!r}.")
+        if reassignment_ratio is not None:
+            warnings.warn(
+                "reassignment_ratio is ignored and will be removed; use reassign_centers "
+                "(False replaces reassignment_ratio=0).",
+                FutureWarning,
+                stacklevel=2,
             )
-        self.reassignment_ratio = reassignment_ratio
+        self.reassign_centers = reassign_centers
         if dtype not in (torch.float32, torch.float64):
             raise ValueError(f"dtype must be torch.float32 or torch.float64, got {dtype}.")
         self.device = device
@@ -511,12 +518,13 @@ class MiniBatchKMeans:
             return False
 
     def _under_used(
-        self, centers: torch.Tensor, periodic: bool, row_errors: torch.Tensor | None
+        self, centers: torch.Tensor, periodic: bool, row_errors: torch.Tensor
     ) -> torch.Tensor:
-        """Mask of the clusters that ``reassignment_ratio`` marks for reassignment."""
+        """Mask of the clusters marked for reassignment.
+
+        ``row_errors`` is the squared distance of each minibatch row to its center.
+        """
         counts = self._counts
-        if row_errors is None:
-            return counts < self.reassignment_ratio * counts.max()
         under_used = counts < _AUTO_COUNT_FRAC * counts.mean()
         if not periodic:
             # A check forced by an empty cluster skips the pairwise search.
@@ -541,13 +549,12 @@ class MiniBatchKMeans:
         """Move the centers of under-used clusters.
 
         A check runs when some cluster is empty, or every
-        ``_REASSIGN_K * n_clusters`` rows (periodic). Unless
-        ``reassignment_ratio`` is ``0``, the clusters that `_under_used` marks
-        are candidates, at most ``_MAX_REASSIGN_FRAC * batch_size`` of them.
-        With ``"auto"`` each one takes over half of a donor cluster (see
-        `_split_donors`); with a number it moves to a random row of ``X``.
-        The input ``centers`` tensor is not modified, and ``self._counts`` is
-        adjusted for the clusters that change.
+        ``_REASSIGN_K * n_clusters`` rows (periodic). If ``reassign_centers``
+        is set, the clusters that `_under_used` marks are candidates, at most
+        ``_MAX_REASSIGN_FRAC * batch_size`` of them, and each one takes over
+        half of a donor cluster (see `_split_donors`). The input ``centers``
+        tensor is not modified, and ``self._counts`` is adjusted for the
+        clusters that change.
 
         Parameters
         ----------
@@ -568,19 +575,15 @@ class MiniBatchKMeans:
         if not periodic and not (self._counts == 0).any().item():
             return centers
         self._n_since_last_reassign = 0
-        if self.reassignment_ratio == 0:
+        if not self.reassign_centers:
             return centers
 
-        cap = int(_MAX_REASSIGN_FRAC * X.shape[0])
-        row_errors = donor_weights = None
-        if self.reassignment_ratio == "auto":
-            row_errors = (X - self._cluster_centers[labels]).square().sum(dim=1)
+        row_errors = (X - self._cluster_centers[labels]).square().sum(dim=1)
         to_reassign = self._under_used(centers, periodic, row_errors)
-        if row_errors is not None:
-            # Donors: clusters that stay and have error in this minibatch.
-            donor_weights = torch.zeros_like(self._counts).index_add_(0, labels, row_errors)
-            donor_weights[to_reassign] = 0
-            cap = min(cap, int((donor_weights > 0).sum().item()))
+        # Donors: clusters that stay and have error in this minibatch.
+        donor_weights = torch.zeros_like(self._counts).index_add_(0, labels, row_errors)
+        donor_weights[to_reassign] = 0
+        cap = min(int(_MAX_REASSIGN_FRAC * X.shape[0]), int((donor_weights > 0).sum().item()))
 
         n_to_reassign = int(to_reassign.sum().item())
         if n_to_reassign > cap:
@@ -595,18 +598,8 @@ class MiniBatchKMeans:
             print(f"[MiniBatchKMeans] Reassigning {n_to_reassign} cluster centers.")
 
         out = centers.clone()
-        if donor_weights is not None:
-            donors = _sample_without_replacement(donor_weights, n_to_reassign, self.random_state)
-            self._split_donors(X, labels, out, torch.where(to_reassign)[0], donors)
-            return out
-
-        # Distinct random minibatch rows as new center locations.
-        perm = torch.randperm(X.shape[0], device="cpu", generator=self.random_state).to(X.device)
-        out[to_reassign] = X[perm[:n_to_reassign]]
-        # Match reassigned centers to a conservative weight (min among
-        # clusters we kept, or 1 if everything was reassigned).
-        non_empty = self._counts[~to_reassign]
-        self._counts[to_reassign] = non_empty.min() if non_empty.numel() > 0 else 1.0
+        donors = _sample_without_replacement(donor_weights, n_to_reassign, self.random_state)
+        self._split_donors(X, labels, out, torch.where(to_reassign)[0], donors)
         return out
 
     def _split_donors(
@@ -946,9 +939,9 @@ class MiniBatchKMeans:
         """
         path = Path(path)
         payload: dict = {
-            "format_version": 2 if self.reassignment_ratio == "auto" else 1,
+            "format_version": _CHECKPOINT_FORMAT_VERSION,
             "n_clusters": self.n_clusters,
-            "reassignment_ratio": self.reassignment_ratio,
+            "reassign_centers": self.reassign_centers,
             "dtype_str": _dtype_to_str(self.dtype),
             "fitted": self._cluster_centers is not None,
             "random_state": self.random_state.get_state(),
@@ -1028,11 +1021,16 @@ class MiniBatchKMeans:
         dtype = _dtype_from_str(payload["dtype_str"])
         rng = torch.Generator(device="cpu")
         rng.set_state(payload["random_state"])
-        ratio = payload["reassignment_ratio"]
+        if "reassign_centers" in payload:
+            reassign_centers = bool(payload["reassign_centers"])
+        else:
+            # Version 1 stored a reassignment_ratio. 0 turned reassignment off;
+            # any other value used a rule that this switch replaces.
+            reassign_centers = bool(payload["reassignment_ratio"] != 0)
         inst = cls(
             n_clusters=int(payload["n_clusters"]),
             verbose=verbose,
-            reassignment_ratio=ratio if ratio == "auto" else float(ratio),
+            reassign_centers=reassign_centers,
             random_state=rng,
             device=target_device,
             dtype=dtype,

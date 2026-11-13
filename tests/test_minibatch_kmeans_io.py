@@ -6,6 +6,7 @@ import contextlib
 import io
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 import torch
@@ -22,7 +23,7 @@ class TestMiniBatchKMeansIO(unittest.TestCase):
         km = MiniBatchKMeans(
             n_clusters=4,
             verbose=False,
-            reassignment_ratio=0.02,
+            reassign_centers=False,
             random_state=rng,
             dtype=torch.float32,
         )
@@ -35,7 +36,7 @@ class TestMiniBatchKMeansIO(unittest.TestCase):
             loaded = MiniBatchKMeans.load(path)
 
         self.assertEqual(loaded.n_clusters, km.n_clusters)
-        self.assertEqual(loaded.reassignment_ratio, km.reassignment_ratio)
+        self.assertIs(loaded.reassign_centers, False)
         self.assertEqual(loaded.dtype, km.dtype)
         self.assertTrue(torch.allclose(loaded.cluster_centers, km.cluster_centers))
         self.assertTrue(torch.allclose(loaded._counts, km._counts))
@@ -59,7 +60,7 @@ class TestMiniBatchKMeansIO(unittest.TestCase):
             km.save(path)
             loaded = MiniBatchKMeans.load(path)
 
-        self.assertEqual(loaded.reassignment_ratio, "auto")
+        self.assertIs(loaded.reassign_centers, True)
         x = torch.randn(30, 4, dtype=torch.float32)
         self.assertTrue(torch.equal(km.predict(x), loaded.predict(x)))
 
@@ -84,29 +85,32 @@ class TestMiniBatchKMeansIO(unittest.TestCase):
                 MiniBatchKMeans.load(path)
             self.assertIn("format_version", str(ctx.exception).lower())
 
-    def test_version_1_checkpoint_with_a_numeric_ratio_loads(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path, x = self._save_fitted(td, format_version=1, reassignment_ratio=0.05)
-            loaded = MiniBatchKMeans.load(path)
-        self.assertEqual(loaded.reassignment_ratio, 0.05)
-        self.assertEqual(loaded.predict(x).shape, (50,))
-
-    def test_auto_is_saved_under_a_version_older_releases_reject(self) -> None:
-        # Older releases read only version 1 and cannot parse "auto".
+    def test_checkpoint_stores_the_switch_as_version_2(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path, _ = self._save_fitted(td)
             payload = torch.load(path, weights_only=False)
-        self.assertEqual(payload["reassignment_ratio"], "auto")
         self.assertEqual(payload["format_version"], 2)
+        self.assertIs(payload["reassign_centers"], True)
+        self.assertNotIn("reassignment_ratio", payload)
 
-    def test_numeric_ratio_is_saved_as_version_1(self) -> None:
-        # Nothing in such a file is new, so older releases can still load it.
-        km = MiniBatchKMeans(n_clusters=2, reassignment_ratio=0.01)
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "n.pt"
-            km.save(path)
-            payload = torch.load(path, weights_only=False)
-        self.assertEqual(payload["format_version"], 1)
+    def test_checkpoints_with_a_reassignment_ratio_load(self) -> None:
+        # Version 1 (released) stored a number; 0 meant off. Unreleased
+        # version 2 files stored "auto". None of them has reassign_centers.
+        # The number was stored as given, so it may be a tensor or numpy scalar.
+        cases = [(1, 0, False), (1, 0.0, False), (1, 0.05, True), (2, "auto", True)]
+        cases += [(1, torch.tensor(0.0), False), (1, torch.tensor(0.01), True)]
+        for version, ratio, expected in cases:
+            with self.subTest(version=version, ratio=ratio), tempfile.TemporaryDirectory() as td:
+                path, x = self._save_fitted(td)
+                payload = torch.load(path, weights_only=False)
+                del payload["reassign_centers"]
+                payload.update(format_version=version, reassignment_ratio=ratio)
+                torch.save(payload, path)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")  # loading must not warn
+                    loaded = MiniBatchKMeans.load(path)
+                self.assertIs(loaded.reassign_centers, expected)
+                self.assertEqual(loaded.predict(x).shape, (50,))
 
     def _save_fitted(self, td: str, **legacy_fields: object) -> tuple[Path, torch.Tensor]:
         """Save a small fitted CPU model; optionally add fields older versions wrote."""

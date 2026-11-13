@@ -1,12 +1,14 @@
-"""API: run_minibatch_kmeans accepts reassignment_ratio and returns it."""
+"""API: run_minibatch_kmeans runs with center reassignment on (default) and off."""
 
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import torch
 
-from evaluation.backends.minibatch_kmeans import run_minibatch_kmeans
+from evaluation.backends import minibatch_kmeans as backend
+from minibatch_kmeans import MiniBatchKMeans
 
 
 class TestMinibatchReassignmentApi(unittest.TestCase):
@@ -20,42 +22,24 @@ class TestMinibatchReassignmentApi(unittest.TestCase):
         torch.manual_seed(0)
         self.x = torch.randn(self.n, self.d, dtype=torch.float32)
 
-    def test_default_reassignment_ratio_recorded(self) -> None:
-        out = run_minibatch_kmeans(
-            self.x,
-            self.k,
-            self.niter,
-            self.seed,
-            self.device,
-            batch_size=32,
-        )
-        self.assertEqual(out["reassignment_ratio"], "auto")
-        self.assertEqual(out["centroids"].shape, (self.k, self.d))
+    def _run(self, **kwargs: bool) -> tuple[torch.Tensor, bool]:
+        """Centroids, and the ``reassign_centers`` value the model was built with."""
+        with mock.patch.object(backend, "MiniBatchKMeans", wraps=MiniBatchKMeans) as model:
+            out = backend.run_minibatch_kmeans(
+                self.x, self.k, self.niter, self.seed, self.device, batch_size=32, **kwargs
+            )
+        self.assertNotIn("reassignment_ratio", out)
+        return out["centroids"], model.call_args.kwargs["reassign_centers"]
 
-    def test_auto_can_be_passed_explicitly(self) -> None:
-        out = run_minibatch_kmeans(
-            self.x,
-            self.k,
-            self.niter,
-            self.seed,
-            self.device,
-            batch_size=32,
-            reassignment_ratio="auto",
-        )
-        self.assertEqual(out["reassignment_ratio"], "auto")
+    def test_reassignment_is_on_by_default(self) -> None:
+        centers, switch = self._run()
+        self.assertIs(switch, True)
+        self.assertEqual(centers.shape, (self.k, self.d))
 
-    def test_zero_reassignment_ratio(self) -> None:
-        out = run_minibatch_kmeans(
-            self.x,
-            self.k,
-            self.niter,
-            self.seed,
-            self.device,
-            batch_size=32,
-            reassignment_ratio=0.0,
-        )
-        self.assertEqual(out["reassignment_ratio"], 0.0)
-        self.assertTrue(torch.isfinite(out["centroids"]).all())
+    def test_reassignment_can_be_turned_off(self) -> None:
+        centers, switch = self._run(reassign_centers=False)
+        self.assertIs(switch, False)
+        self.assertTrue(torch.isfinite(centers).all())
 
 
 if __name__ == "__main__":

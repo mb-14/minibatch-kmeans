@@ -99,7 +99,6 @@ def _fit_centroids(
             seed,
             device,
             batch_size=mb_bs,
-            reassignment_ratio=reassignment_ratio,
         )
     elif method == SKLEARNKMEANS:
         out = run_sklearn_kmeans(x, k, niter, seed, device)
@@ -172,7 +171,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=non_negative_float,
         default=0.1,
         metavar="R",
-        help="reassignment_ratio for minibatchkmeans and sklearnminibatchkmeans (default: 0.1).",
+        help="reassignment_ratio for sklearnminibatchkmeans (default: 0.1).",
     )
     p.add_argument(
         "--batch-size",

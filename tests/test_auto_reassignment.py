@@ -1,4 +1,4 @@
-"""reassignment_ratio="auto": which clusters are marked, and where their centers go."""
+"""Center reassignment: which clusters are marked, and where their centers go."""
 
 import unittest
 from unittest import mock
@@ -8,14 +8,18 @@ import torch
 from minibatch_kmeans import MiniBatchKMeans, _core
 
 
-def _model(counts: list[float], ratio, centers=None) -> tuple[MiniBatchKMeans, torch.Tensor]:
+def _model(
+    counts: list[float], centers=None, reassign_centers: bool = True
+) -> tuple[MiniBatchKMeans, torch.Tensor]:
     """A fitted model with the given counts whose next step runs a periodic check.
 
     The default centers are far apart (10 units between neighbors). The batch
     has four rows per center, each one unit away from it.
     """
     k = len(counts)
-    km = MiniBatchKMeans(k, reassignment_ratio=ratio, random_state=torch.Generator().manual_seed(0))
+    km = MiniBatchKMeans(
+        k, reassign_centers=reassign_centers, random_state=torch.Generator().manual_seed(0)
+    )
     if centers is None:
         centers = [[10.0 * j, 0.0] for j in range(k)]
     km._cluster_centers = torch.tensor(centers)
@@ -31,40 +35,49 @@ def _step(km: MiniBatchKMeans, batch: torch.Tensor) -> torch.Tensor:
 
 
 def _reassigned(km: MiniBatchKMeans, batch: torch.Tensor) -> list[int]:
-    """Clusters whose count changed: the marked ones and, under "auto", their donors."""
+    """Clusters whose count changed: the marked ones and their donors."""
     before = km._counts.clone()
     _step(km, batch)
     return (km._counts != before).nonzero().flatten().tolist()
 
 
 def _marked(km: MiniBatchKMeans, batch: torch.Tensor) -> list[int]:
-    """Clusters that a periodic check marks under "auto"."""
+    """Clusters that a periodic check marks."""
     labels, _ = km._labels_inertia(batch, return_inertia=False)
     row_errors = (batch - km._cluster_centers[labels]).square().sum(dim=1)
     return km._under_used(km._cluster_centers, True, row_errors).nonzero().flatten().tolist()
 
 
 class TestAutoReassignment(unittest.TestCase):
-    def test_default_is_auto(self) -> None:
-        self.assertEqual(MiniBatchKMeans(3).reassignment_ratio, "auto")
+    def test_on_by_default(self) -> None:
+        self.assertIs(MiniBatchKMeans(3).reassign_centers, True)
 
-    def test_invalid_values_raise(self) -> None:
-        for bad in ("mean", "Auto", -0.1):
-            with self.assertRaisesRegex(ValueError, "reassignment_ratio"):
-                MiniBatchKMeans(3, reassignment_ratio=bad)
+    def test_only_a_bool_is_accepted(self) -> None:
+        for bad in ("auto", 0.01, 0, 1, None):
+            with self.assertRaisesRegex(ValueError, "reassign_centers"):
+                MiniBatchKMeans(3, reassign_centers=bad)
+
+    def test_old_reassignment_ratio_argument_warns_and_is_ignored(self) -> None:
+        for old in (0, 0.01, "auto"):
+            with self.assertWarnsRegex(FutureWarning, "reassignment_ratio"):
+                km = MiniBatchKMeans(3, reassignment_ratio=old)
+            self.assertIs(km.reassign_centers, True)
+            self.assertFalse(hasattr(km, "reassignment_ratio"))
+        with self.assertWarns(FutureWarning):
+            km = MiniBatchKMeans(3, reassign_centers=False, reassignment_ratio=0.01)
+        self.assertIs(km.reassign_centers, False)
 
     def test_one_large_cluster_does_not_raise_the_threshold(self) -> None:
         # The 300s are small next to the largest cluster, but in use.
         counts = [10_000.0, 300.0, 300.0, 300.0]
-        self.assertEqual(_marked(*_model(counts, "auto")), [])
-        self.assertEqual(_reassigned(*_model(counts, 0.05)), [1, 2, 3])
+        self.assertEqual(_marked(*_model(counts)), [])
 
     def test_cluster_far_below_the_mean_count_is_reassigned(self) -> None:
         counts = [100.0, 120.0, 1.0, 90.0]
-        self.assertEqual(_marked(*_model(counts, "auto")), [2])
+        self.assertEqual(_marked(*_model(counts)), [2])
 
     def test_marked_center_takes_half_of_a_donor_cluster(self) -> None:
-        km, batch = _model([100.0, 120.0, 1.0, 90.0], "auto")
+        km, batch = _model([100.0, 120.0, 1.0, 90.0])
         before = km._cluster_centers.clone()
         out = _step(km, batch)
         moved = (out != before).any(dim=1).nonzero().flatten().tolist()
@@ -79,40 +92,31 @@ class TestAutoReassignment(unittest.TestCase):
         expected[donor] = expected[2] = expected[donor] / 2
         self.assertEqual(km._counts.tolist(), expected)
 
-    def test_number_moves_the_center_to_a_row_and_keeps_the_others(self) -> None:
-        km, batch = _model([100.0, 120.0, 1.0, 90.0], 0.05)
-        before = km._cluster_centers.clone()
-        out = _step(km, batch)
-        self.assertEqual((out != before).any(dim=1).nonzero().flatten().tolist(), [2])
-        self.assertTrue((batch == out[2]).all(dim=1).any().item())
-        self.assertEqual(km._counts.tolist(), [100.0, 120.0, 90.0, 90.0])
-
     def test_one_of_two_centers_sharing_a_spot_is_reassigned(self) -> None:
         # Centers 1 and 2 are 0.1 apart: removing either adds almost no error.
         centers = [[0.0, 0.0], [10.0, 0.0], [10.1, 0.0], [20.0, 0.0], [30.0, 0.0]]
         counts = [100.0, 60.0, 50.0, 100.0, 100.0]
-        self.assertEqual(_marked(*_model(counts, "auto", centers)), [1])
-        self.assertEqual(_reassigned(*_model(counts, 0.01, centers)), [])
+        self.assertEqual(_marked(*_model(counts, centers)), [1])
 
     def test_redundant_centers_are_found_when_they_are_the_majority(self) -> None:
         # Four of five centers share one spot, so the median removal cost is
         # itself tiny; the comparison with the batch error still marks one.
         centers = [[0.0, 0.0], [0.01, 0.0], [0.03, 0.0], [0.06, 0.0], [100.0, 0.0]]
-        self.assertEqual(_marked(*_model([100.0] * 5, "auto", centers)), [0])
+        self.assertEqual(_marked(*_model([100.0] * 5, centers)), [0])
 
     def test_small_cluster_far_from_the_others_is_kept(self) -> None:
         centers = [[0.0, 0.0], [10.0, 0.0], [20.0, 0.0], [500.0, 0.0]]
-        self.assertEqual(_marked(*_model([100.0, 100.0, 100.0, 5.0], "auto", centers)), [])
+        self.assertEqual(_marked(*_model([100.0, 100.0, 100.0, 5.0], centers)), [])
 
     def test_decision_does_not_depend_on_rows_seen(self) -> None:
         centers = [[0.0, 0.0], [10.0, 0.0], [10.1, 0.0], [20.0, 0.0], [30.0, 0.0]]
         for scale in (1.0, 1000.0):
             counts = [c * scale for c in (100.0, 60.0, 50.0, 100.0, 1.0)]
-            self.assertEqual(_marked(*_model(counts, "auto", centers)), [1, 4])
+            self.assertEqual(_marked(*_model(counts, centers)), [1, 4])
 
     def test_check_forced_by_an_empty_cluster_uses_counts_only(self) -> None:
         centers = [[0.0, 0.0], [10.0, 0.0], [10.1, 0.0], [20.0, 0.0], [30.0, 0.0]]
-        km, batch = _model([100.0, 60.0, 50.0, 100.0, 0.0], "auto", centers)
+        km, batch = _model([100.0, 60.0, 50.0, 100.0, 0.0], centers)
         km._n_since_last_reassign = 0
         changed = _reassigned(km, batch)  # center 4 and its donor
         self.assertEqual(len(changed), 2)
@@ -142,8 +146,9 @@ class TestAutoReassignment(unittest.TestCase):
             paired = counts * counts[expected] / (counts + counts[expected])
             torch.testing.assert_close(cost, paired * dist.min(dim=1).values ** 2)
 
-    def test_zero_disables(self) -> None:
-        self.assertEqual(_reassigned(*_model([100.0, 0.0, 100.0], 0)), [])
+    def test_false_disables(self) -> None:
+        self.assertEqual(_reassigned(*_model([100.0, 0.0, 100.0], reassign_centers=False)), [])
+        self.assertEqual(len(_reassigned(*_model([100.0, 0.0, 100.0]))), 2)
 
     def test_partial_fit_revives_a_dead_center(self) -> None:
         torch.manual_seed(0)
