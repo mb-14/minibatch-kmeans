@@ -10,12 +10,20 @@ from ._utils import default_cpu_generator, nvtx_range, row_sq_norms
 _REASSIGN_K = 10
 _MAX_REASSIGN_FRAC = 0.5
 # reassignment_ratio="auto": a cluster is under-used when its count is below
-# _AUTO_COUNT_FRAC of the mean count, or when removing it would add less than
-# _AUTO_COST_FRAC of the median removal cost (see _removal_costs). The median,
-# not the mean: one far-away cluster has a huge cost and would raise a mean
-# threshold above the cost of healthy clusters.
+# _AUTO_COUNT_FRAC of the mean count, or when removing it would add little
+# error (see _removal_costs): less than _AUTO_COST_FRAC of the median removal
+# cost, or less than _AUTO_GAIN_FRAC of the error an average cluster holds.
+# The median, not the mean: one far-away cluster has a huge cost and would
+# raise a mean threshold above the cost of healthy clusters. The median alone
+# fails when most centers are redundant (a stream that has shown few of its
+# groups so far), which is what the second reference covers.
 _AUTO_COUNT_FRAC = 0.03
 _AUTO_COST_FRAC = 0.05
+_AUTO_GAIN_FRAC = 0.01
+# A reassigned center takes over half of a donor cluster: the donor and the
+# new center move this fraction of the way from the donor's mean toward one of
+# the donor's rows, in opposite directions.
+_AUTO_SPLIT_STEP = 0.1
 _REMOVAL_COST_CHUNK = 4096
 _DENOM_EPS = 1e-10
 _CHECKPOINT_FORMAT_VERSION = 1
@@ -215,6 +223,20 @@ def _removal_costs(
     return paired * dist_sq, nearest
 
 
+def _sample_without_replacement(
+    weights: torch.Tensor, n: int, generator: torch.Generator
+) -> torch.Tensor:
+    """``n`` distinct indices, drawn with probability proportional to ``weights``.
+
+    At least ``n`` weights must be positive. Uses the Gumbel top-k trick, so the
+    random numbers come from the CPU generator and the rest stays on the device.
+    """
+    u = torch.rand(weights.shape[0], generator=generator).to(weights.device)
+    u.clamp_(1e-12, 1 - 1e-7)
+    keys = torch.log(weights) - torch.log(-torch.log(u))  # log(0) = -inf: never drawn
+    return torch.topk(keys, n).indices
+
+
 class MiniBatchKMeans:
     """
     Mini-batch K-Means clustering (PyTorch).
@@ -262,17 +284,20 @@ class MiniBatchKMeans:
             generator is created with a random seed (runs are not reproducible).
 
         **reassignment_ratio** (``"auto"`` or `float`, default ``"auto"``):
-            During training, under-used clusters may be re-seeded from random
-            data points. ``"auto"``: a cluster is under-used when its weight is
-            far below the mean cluster weight, or when removing it would add
-            little error because another center is close by (two centers
-            sharing one group of points). Both tests use only the centers and
-            their weights, so they need no row count or training budget. The
-            second test compares all pairs of centers at each check. A `float`
+            During training, the centers of under-used clusters are moved.
+            ``"auto"``: a cluster is under-used when its weight is far below
+            the mean cluster weight, or when removing it would add little
+            error because another center is close by (two centers sharing one
+            group of points). The tests use the centers, their weights and the
+            current minibatch, so they need no row count or training budget.
+            The second test compares all pairs of centers at each check. An
+            under-used center is moved next to a cluster with a large error in
+            the current minibatch, and the two share that cluster. A `float`
             ``>= 0`` gives scikit-learn's rule instead: weight below this
-            fraction of the *largest* cluster weight. That rule needs tuning
-            per dataset, because the largest weight grows with the skew of the
-            data. ``0`` disables reassignment.
+            fraction of the *largest* cluster weight, and the center moves to
+            a random row. That rule needs tuning per dataset, because the
+            largest weight grows with the skew of the data. ``0`` disables
+            reassignment.
 
         **device** (`torch.device`, default ``torch.device("cpu")``):
             Device storing ``cluster_centers`` and used for distance work.
@@ -476,17 +501,24 @@ class MiniBatchKMeans:
 
             return False
 
-    def _under_used(self, centers: torch.Tensor, periodic: bool) -> torch.Tensor:
+    def _under_used(
+        self, centers: torch.Tensor, periodic: bool, row_errors: torch.Tensor | None
+    ) -> torch.Tensor:
         """Mask of the clusters that ``reassignment_ratio`` marks for reassignment."""
         counts = self._counts
-        if self.reassignment_ratio != "auto":
+        if row_errors is None:
             return counts < self.reassignment_ratio * counts.max()
         under_used = counts < _AUTO_COUNT_FRAC * counts.mean()
         if not periodic:
             # A check forced by an empty cluster skips the pairwise search.
             return under_used
         cost, nearest = _removal_costs(centers, counts)
-        cheap = cost < _AUTO_COST_FRAC * cost.median()
+        # Mean error per row times mean rows per cluster: the error an average
+        # cluster holds, on the same scale as the removal costs.
+        mean_cluster_error = row_errors.mean() * counts.mean()
+        cheap = cost < torch.maximum(
+            _AUTO_COST_FRAC * cost.median(), _AUTO_GAIN_FRAC * mean_cluster_error
+        )
         # Two centers that are each other's nearest have the same cost. Removing
         # one makes the other worth keeping, so the cheaper of a marked pair goes
         # first (lower index on a tie) and the other stays.
@@ -494,16 +526,19 @@ class MiniBatchKMeans:
         nearest_goes_first = (cost[nearest] < cost) | ((cost[nearest] == cost) & (nearest < index))
         return under_used | (cheap & ~(cheap[nearest] & nearest_goes_first))
 
-    def _maybe_reassign_centers(self, X: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
-        """Replace under-used cluster centers with random points from this minibatch.
+    def _maybe_reassign_centers(
+        self, X: torch.Tensor, centers: torch.Tensor, labels: torch.Tensor
+    ) -> torch.Tensor:
+        """Move the centers of under-used clusters.
 
         A check runs when some cluster is empty, or every
         ``_REASSIGN_K * n_clusters`` rows (periodic). Unless
         ``reassignment_ratio`` is ``0``, the clusters that `_under_used` marks
-        are candidates. Those center rows are
-        replaced with random rows from ``X`` in a **new** tensor; the input
-        ``centers`` tensor is not modified. ``self._counts`` is adjusted for
-        reassigned clusters so the next updates stay balanced.
+        are candidates, at most ``_MAX_REASSIGN_FRAC * batch_size`` of them.
+        With ``"auto"`` each one takes over half of a donor cluster (see
+        `_split_donors`); with a number it moves to a random row of ``X``.
+        The input ``centers`` tensor is not modified, and ``self._counts`` is
+        adjusted for the clusters that change.
 
         Parameters
         ----------
@@ -511,6 +546,8 @@ class MiniBatchKMeans:
             Minibatch, shape ``(batch_size, n_features)``.
         centers : torch.Tensor
             Proposed centers after `_minibatch_update` (read-only here).
+        labels : torch.Tensor
+            Cluster of each row of ``X`` under ``self._cluster_centers``.
 
         Returns
         -------
@@ -525,42 +562,79 @@ class MiniBatchKMeans:
         if self.reassignment_ratio == 0:
             return centers
 
-        to_reassign = self._under_used(centers, periodic)
-        n_to_reassign = to_reassign.sum().item()
+        cap = int(_MAX_REASSIGN_FRAC * X.shape[0])
+        row_errors = donor_weights = None
+        if self.reassignment_ratio == "auto":
+            row_errors = (X - self._cluster_centers[labels]).square().sum(dim=1)
+        to_reassign = self._under_used(centers, periodic, row_errors)
+        if row_errors is not None:
+            # Donors: clusters that stay and have error in this minibatch.
+            donor_weights = torch.zeros_like(self._counts).index_add_(0, labels, row_errors)
+            donor_weights[to_reassign] = 0
+            cap = min(cap, int((donor_weights > 0).sum().item()))
 
-        batch_size = X.shape[0]
-        cap = int(_MAX_REASSIGN_FRAC * batch_size)
-        if n_to_reassign > _MAX_REASSIGN_FRAC * batch_size:
-            # Do not replace more than half the centers in one step; keep the
-            # marked clusters with the largest weights and only reassign the rest.
-            masked_indices = torch.where(to_reassign)[0]
-            masked_weights = self._counts[to_reassign]
-            n_keep = max(0, n_to_reassign - cap)
-            _, top_in_masked = torch.topk(masked_weights, min(n_keep, len(masked_indices)))
-            indices_dont_reassign = masked_indices[top_in_masked]
-            to_reassign[indices_dont_reassign] = False
-            n_to_reassign = to_reassign.sum().item()
-
+        n_to_reassign = int(to_reassign.sum().item())
+        if n_to_reassign > cap:
+            # Over the cap: the marked clusters with the largest weights stay.
+            marked = torch.where(to_reassign)[0]
+            keep = torch.topk(self._counts[marked], n_to_reassign - cap).indices
+            to_reassign[marked[keep]] = False
+            n_to_reassign = cap
         if n_to_reassign == 0:
             return centers
+        if self.verbose:
+            print(f"[MiniBatchKMeans] Reassigning {n_to_reassign} cluster centers.")
+
+        out = centers.clone()
+        if donor_weights is not None:
+            donors = _sample_without_replacement(donor_weights, n_to_reassign, self.random_state)
+            self._split_donors(X, labels, out, torch.where(to_reassign)[0], donors)
+            return out
 
         # Distinct random minibatch rows as new center locations.
         perm = torch.randperm(X.shape[0], device="cpu", generator=self.random_state).to(X.device)
-        new_center_indices = perm[:n_to_reassign]
-        if self.verbose:
-            print(f"[MiniBatchKMeans] Reassigning {n_to_reassign} cluster centers.")
-        out = centers.clone()
-        out[to_reassign] = X[new_center_indices]
-
+        out[to_reassign] = X[perm[:n_to_reassign]]
         # Match reassigned centers to a conservative weight (min among
         # clusters we kept, or 1 if everything was reassigned).
         non_empty = self._counts[~to_reassign]
-        if non_empty.numel() > 0:
-            self._counts[to_reassign] = non_empty.min()
-        else:
-            self._counts[to_reassign] = 1.0
-
+        self._counts[to_reassign] = non_empty.min() if non_empty.numel() > 0 else 1.0
         return out
+
+    def _split_donors(
+        self,
+        X: torch.Tensor,
+        labels: torch.Tensor,
+        centers: torch.Tensor,
+        targets: torch.Tensor,
+        donors: torch.Tensor,
+    ) -> None:
+        """Give each target center half of one donor cluster, in place.
+
+        Donor ``centers[donors[i]]`` and target ``centers[targets[i]]`` end up on
+        opposite sides of the donor's mean, ``_AUTO_SPLIT_STEP`` of the way to
+        one of the donor's rows in ``X``, and share the donor's count. Every
+        donor must have a row in ``X``.
+        """
+        # One random row per donor: the row of its cluster that comes last in a
+        # random order of the minibatch. (A plain scatter with duplicate indices
+        # would pick an arbitrary row on CUDA, and the last row in batch order
+        # is an extreme one when the caller's rows are sorted.)
+        order = torch.randperm(X.shape[0], device="cpu", generator=self.random_state).to(X.device)
+        last = torch.zeros_like(self._counts, dtype=torch.int64)
+        last.scatter_reduce_(
+            0,
+            labels[order],
+            torch.arange(X.shape[0], device=X.device),
+            reduce="amax",
+            include_self=False,
+        )
+        mean = centers[donors]
+        offset = _AUTO_SPLIT_STEP * (X[order[last[donors]]] - mean)
+        centers[targets] = mean + offset
+        centers[donors] = mean - offset
+        half = self._counts[donors] / 2
+        self._counts[donors] = half
+        self._counts[targets] = half
 
     def _minibatch_update(
         self,
@@ -598,7 +672,7 @@ class MiniBatchKMeans:
             labels, inertia = self._labels_inertia(X, return_inertia=return_inertia)
 
             updated = self._minibatch_update(X, labels)
-            updated = self._maybe_reassign_centers(X, updated)
+            updated = self._maybe_reassign_centers(X, updated, labels)
 
             return updated, inertia
 
