@@ -62,4 +62,5 @@ def run_minibatch_kmeans(
         "cpu_time_s": cpu_s,
         "timing_epochs": max(1, niter),
         "batch_size": int(min(bs, n)),
+        "reassign_centers": reassign_centers,
     }

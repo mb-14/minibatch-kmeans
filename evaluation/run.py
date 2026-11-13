@@ -84,6 +84,7 @@ def _fit_centroids(
     *,
     batch_size: int,
     reassignment_ratio: float | None = None,
+    reassign_centers: bool = True,
 ) -> torch.Tensor:
     n, _d = x.shape
     mb_bs = int(min(n, batch_size))
@@ -99,6 +100,7 @@ def _fit_centroids(
             seed,
             device,
             batch_size=mb_bs,
+            reassign_centers=reassign_centers,
         )
     elif method == SKLEARNKMEANS:
         out = run_sklearn_kmeans(x, k, niter, seed, device)
@@ -174,6 +176,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="reassignment_ratio for sklearnminibatchkmeans (default: 0.1).",
     )
     p.add_argument(
+        "--no-reassign-centers",
+        dest="reassign_centers",
+        action="store_false",
+        help="Run minibatchkmeans with reassign_centers=False (default: on).",
+    )
+    p.add_argument(
         "--batch-size",
         type=positive_int,
         default=16_384,
@@ -233,6 +241,7 @@ def _scores_over_references(
                 dev,
                 batch_size=args.batch_size,
                 reassignment_ratio=args.reassignment_ratio,
+                reassign_centers=args.reassign_centers,
             )
         except Exception as e:  # noqa: BLE001 - one failed backend run must not abort the batch
             print(f"  {method} seed {seed} ref {ref_idx} (k={k}) failed: {e}", file=sys.stderr)

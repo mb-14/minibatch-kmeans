@@ -1,8 +1,12 @@
 """Center reassignment: which clusters are marked, and where their centers go."""
 
+import pickle
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
+import numpy as np
 import torch
 
 from minibatch_kmeans import MiniBatchKMeans, _core
@@ -53,9 +57,32 @@ class TestAutoReassignment(unittest.TestCase):
         self.assertIs(MiniBatchKMeans(3).reassign_centers, True)
 
     def test_only_a_bool_is_accepted(self) -> None:
-        for bad in ("auto", 0.01, 0, 1, None):
+        for bad in ("auto", 0.01, 0, 1, None, torch.tensor(True)):
             with self.assertRaisesRegex(ValueError, "reassign_centers"):
                 MiniBatchKMeans(3, reassign_centers=bad)
+        km = MiniBatchKMeans(3)
+        with self.assertRaisesRegex(ValueError, "reassign_centers"):
+            km.reassign_centers = 0  # also when set later
+        self.assertIs(km.reassign_centers, True)
+
+    def test_numpy_boolean_is_accepted(self) -> None:
+        for value in (np.bool_(False), np.bool_(True), np.any(np.zeros(3))):
+            km = MiniBatchKMeans(3, reassign_centers=value)
+            self.assertIs(km.reassign_centers, bool(value))
+
+    def test_object_pickled_before_the_switch_existed(self) -> None:
+        # Such an object has a reassignment_ratio attribute and no switch; 0 meant off.
+        for ratio, expected in ((0.01, True), (0, False), ("auto", True)):
+            km = MiniBatchKMeans(3, random_state=torch.Generator().manual_seed(0))
+            km.partial_fit(torch.randn(64, 2))
+            del km._reassign_centers
+            km.reassignment_ratio = ratio
+            old = pickle.loads(pickle.dumps(km))
+            self.assertIs(old.reassign_centers, expected)
+            old.partial_fit(torch.randn(64, 2))
+            with tempfile.TemporaryDirectory() as td:
+                old.save(Path(td) / "m.pt")
+                self.assertIs(MiniBatchKMeans.load(Path(td) / "m.pt").reassign_centers, expected)
 
     def test_old_reassignment_ratio_argument_warns_and_is_ignored(self) -> None:
         for old in (0, 0.01, "auto"):

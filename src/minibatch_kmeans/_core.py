@@ -338,8 +338,6 @@ class MiniBatchKMeans:
             raise ValueError("random_state must be a torch.Generator on CPU or None.")
         else:
             self.random_state = random_state
-        if not isinstance(reassign_centers, bool):
-            raise ValueError(f"reassign_centers must be True or False, got {reassign_centers!r}.")
         if reassignment_ratio is not None:
             warnings.warn(
                 "reassignment_ratio is ignored and will be removed; use reassign_centers "
@@ -354,6 +352,25 @@ class MiniBatchKMeans:
         self.dtype = dtype
         self.assignment_backend = assignment_backend
         self._cluster_centers: torch.Tensor | None = None
+
+    @property
+    def reassign_centers(self) -> bool:
+        """Whether the centers of under-used clusters are moved during training."""
+        if "_reassign_centers" not in self.__dict__:
+            # An object pickled before the switch existed has a
+            # reassignment_ratio instead, where 0 turned reassignment off.
+            return bool(self.__dict__.get("reassignment_ratio", 1) != 0)
+        return self._reassign_centers
+
+    @reassign_centers.setter
+    def reassign_centers(self, value: bool) -> None:
+        # A NumPy boolean scalar (dtype kind "b") is accepted; 0 and 1 are not.
+        if (
+            not isinstance(value, bool)
+            and getattr(getattr(value, "dtype", None), "kind", "") != "b"
+        ):
+            raise ValueError(f"reassign_centers must be True or False, got {value!r}.")
+        self._reassign_centers = bool(value)
 
     @property
     def assignment_backend(self) -> str:

@@ -7,6 +7,7 @@ from unittest import mock
 
 import torch
 
+from evaluation import perf_test, run
 from evaluation.backends import minibatch_kmeans as backend
 from minibatch_kmeans import MiniBatchKMeans
 
@@ -29,6 +30,7 @@ class TestMinibatchReassignmentApi(unittest.TestCase):
                 self.x, self.k, self.niter, self.seed, self.device, batch_size=32, **kwargs
             )
         self.assertNotIn("reassignment_ratio", out)
+        self.assertIs(out["reassign_centers"], model.call_args.kwargs["reassign_centers"])
         return out["centroids"], model.call_args.kwargs["reassign_centers"]
 
     def test_reassignment_is_on_by_default(self) -> None:
@@ -40,6 +42,44 @@ class TestMinibatchReassignmentApi(unittest.TestCase):
         centers, switch = self._run(reassign_centers=False)
         self.assertIs(switch, False)
         self.assertTrue(torch.isfinite(centers).all())
+
+    def test_command_line_flag_reaches_the_backend(self) -> None:
+        # --no-reassign-centers is the only way to get the no-reassignment baseline.
+        for argv, expected in (([], True), (["--no-reassign-centers"], False)):
+            args = run._build_parser().parse_args(["--data-path", "unused", *argv])
+            self.assertIs(args.reassign_centers, expected)
+            self.assertIs(perf_test.parse_args(argv).reassign_centers, expected)
+            with mock.patch.object(
+                run, "run_minibatch_kmeans", wraps=run.run_minibatch_kmeans
+            ) as b:
+                run._fit_centroids(
+                    run.MINIBATCHKMEANS,
+                    self.x,
+                    self.k,
+                    2,
+                    self.seed,
+                    self.device,
+                    batch_size=32,
+                    reassign_centers=args.reassign_centers,
+                )
+            self.assertIs(b.call_args.kwargs["reassign_centers"], expected)
+            with mock.patch.object(
+                perf_test, "run_minibatch_kmeans", wraps=perf_test.run_minibatch_kmeans
+            ) as b:
+                perf_test._run_backend(
+                    perf_test.MINIBATCHKMEANS,
+                    self.x,
+                    self.k,
+                    2,
+                    self.seed,
+                    self.device,
+                    batch_size=32,
+                    reassignment_ratio=0.01,
+                    reassign_centers=expected,
+                    flash_warmup_runs=0,
+                    flash_timed_repeats=1,
+                )
+            self.assertIs(b.call_args.kwargs["reassign_centers"], expected)
 
 
 if __name__ == "__main__":

@@ -97,10 +97,9 @@ def _benchmark_row(
     }
     if "iters_done" in out:
         row["backend_iterations_done"] = out["iters_done"]
-    if out.get("batch_size") is not None:
-        row["batch_size"] = out["batch_size"]
-    if out.get("reassignment_ratio") is not None:
-        row["reassignment_ratio"] = out["reassignment_ratio"]
+    for key in ("batch_size", "reassignment_ratio", "reassign_centers"):
+        if out.get(key) is not None:
+            row[key] = out[key]
     if out.get("flash_large_n"):
         row["flash_large_n"] = True
     if out.get("timing_repeats") not in (None, 1) or out.get("timing_warmup_runs"):
@@ -192,6 +191,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="reassignment_ratio for sklearnminibatchkmeans (default: 0.01)",
     )
     p.add_argument(
+        "--no-reassign-centers",
+        dest="reassign_centers",
+        action="store_false",
+        help="Run minibatchkmeans with reassign_centers=False (default: on).",
+    )
+    p.add_argument(
         "--eval-quality",
         action="store_true",
         help="WCSS + NMI on train (75%%) and val (25%%) holdout",
@@ -258,6 +263,7 @@ def _run_backend(
     *,
     batch_size: int,
     reassignment_ratio: float,
+    reassign_centers: bool,
     flash_warmup_runs: int,
     flash_timed_repeats: int,
 ) -> dict:
@@ -281,6 +287,7 @@ def _run_backend(
             seed,
             dev,
             batch_size=batch_size,
+            reassign_centers=reassign_centers,
         )
     if method == SKLEARNKMEANS:
         return run_sklearn_kmeans(x_train, k, niter, seed, dev)
@@ -379,6 +386,7 @@ def main(argv: list[str] | None = None) -> None:
             dev,
             batch_size=args.batch_size,
             reassignment_ratio=args.reassignment_ratio,
+            reassign_centers=args.reassign_centers,
             flash_warmup_runs=args.flash_warmup_runs,
             flash_timed_repeats=args.flash_timed_repeats,
         )
