@@ -84,12 +84,13 @@ class TestAutoReassignment(unittest.TestCase):
                 old.save(Path(td) / "m.pt")
                 self.assertIs(MiniBatchKMeans.load(Path(td) / "m.pt").reassign_centers, expected)
 
-    def test_old_reassignment_ratio_argument_warns_and_is_ignored(self) -> None:
-        for old in (0, 0.01, "auto"):
+    def test_old_reassignment_ratio_argument_warns_and_only_zero_has_an_effect(self) -> None:
+        # 0 used to disable reassignment and still does; other values are ignored.
+        for old, expected in ((0, False), (0.0, False), (0.01, True), ("auto", True)):
             with self.assertWarnsRegex(FutureWarning, "reassignment_ratio"):
                 km = MiniBatchKMeans(3, reassignment_ratio=old)
-            self.assertIs(km.reassign_centers, True)
-            self.assertFalse(hasattr(km, "reassignment_ratio"))
+            self.assertIs(km.reassign_centers, expected)
+            self.assertNotIn("reassignment_ratio", vars(km))
         with self.assertWarns(FutureWarning):
             km = MiniBatchKMeans(3, reassign_centers=False, reassignment_ratio=0.01)
         self.assertIs(km.reassign_centers, False)

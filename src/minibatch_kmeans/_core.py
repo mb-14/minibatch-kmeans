@@ -325,10 +325,10 @@ class MiniBatchKMeans:
             summation order.
 
         **reassignment_ratio** (deprecated):
-            Ignored. Earlier versions took a number here (scikit-learn's
-            threshold) or ``"auto"``. Passing any value warns and has no
-            effect, including ``0``, which used to disable reassignment: use
-            ``reassign_centers=False`` for that.
+            Earlier versions took a number here (scikit-learn's threshold).
+            Passing any value warns. ``0``, which used to disable
+            reassignment, sets ``reassign_centers=False``; any other value is
+            ignored. Use ``reassign_centers`` instead.
         """
         self.n_clusters = n_clusters
         self.verbose = bool(verbose)
@@ -340,11 +340,13 @@ class MiniBatchKMeans:
             self.random_state = random_state
         if reassignment_ratio is not None:
             warnings.warn(
-                "reassignment_ratio is ignored and will be removed; use reassign_centers "
-                "(False replaces reassignment_ratio=0).",
+                "reassignment_ratio will be removed; use reassign_centers. For now 0 sets "
+                "reassign_centers=False and any other value is ignored.",
                 FutureWarning,
                 stacklevel=2,
             )
+            if not bool(reassignment_ratio != 0):
+                reassign_centers = False
         self.reassign_centers = reassign_centers
         if dtype not in (torch.float32, torch.float64):
             raise ValueError(f"dtype must be torch.float32 or torch.float64, got {dtype}.")
