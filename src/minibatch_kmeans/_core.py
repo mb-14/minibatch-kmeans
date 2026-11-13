@@ -29,8 +29,8 @@ _AUTO_SPLIT_STEP = 0.1
 _REMOVAL_COST_CHUNK = 4096
 _REMOVAL_COST_BYTES = 1 << 30
 _DENOM_EPS = 1e-10
-# Version 2 added reassignment_ratio="auto"; version 1 files still load.
-_CHECKPOINT_FORMAT_VERSION = 2
+# A checkpoint is version 2 when reassignment_ratio is "auto", which version 1
+# readers cannot parse, and version 1 otherwise, so older releases still load it.
 _READABLE_CHECKPOINT_VERSIONS = (1, 2)
 
 
@@ -946,7 +946,7 @@ class MiniBatchKMeans:
         """
         path = Path(path)
         payload: dict = {
-            "format_version": _CHECKPOINT_FORMAT_VERSION,
+            "format_version": 2 if self.reassignment_ratio == "auto" else 1,
             "n_clusters": self.n_clusters,
             "reassignment_ratio": self.reassignment_ratio,
             "dtype_str": _dtype_to_str(self.dtype),

@@ -97,7 +97,16 @@ class TestMiniBatchKMeansIO(unittest.TestCase):
             path, _ = self._save_fitted(td)
             payload = torch.load(path, weights_only=False)
         self.assertEqual(payload["reassignment_ratio"], "auto")
-        self.assertGreater(payload["format_version"], 1)
+        self.assertEqual(payload["format_version"], 2)
+
+    def test_numeric_ratio_is_saved_as_version_1(self) -> None:
+        # Nothing in such a file is new, so older releases can still load it.
+        km = MiniBatchKMeans(n_clusters=2, reassignment_ratio=0.01)
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "n.pt"
+            km.save(path)
+            payload = torch.load(path, weights_only=False)
+        self.assertEqual(payload["format_version"], 1)
 
     def _save_fitted(self, td: str, **legacy_fields: object) -> tuple[Path, torch.Tensor]:
         """Save a small fitted CPU model; optionally add fields older versions wrote."""

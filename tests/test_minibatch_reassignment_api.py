@@ -32,6 +32,18 @@ class TestMinibatchReassignmentApi(unittest.TestCase):
         self.assertEqual(out["reassignment_ratio"], "auto")
         self.assertEqual(out["centroids"].shape, (self.k, self.d))
 
+    def test_auto_can_be_passed_explicitly(self) -> None:
+        out = run_minibatch_kmeans(
+            self.x,
+            self.k,
+            self.niter,
+            self.seed,
+            self.device,
+            batch_size=32,
+            reassignment_ratio="auto",
+        )
+        self.assertEqual(out["reassignment_ratio"], "auto")
+
     def test_zero_reassignment_ratio(self) -> None:
         out = run_minibatch_kmeans(
             self.x,
