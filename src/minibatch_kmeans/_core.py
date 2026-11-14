@@ -178,6 +178,8 @@ def _partial_squared_distances(X: torch.Tensor, C: torch.Tensor) -> torch.Tensor
 
 _ASSIGNMENT_BACKENDS = ("native", "triton")
 _DEFAULT_ASSIGNMENT_BACKEND = "native"
+# Precisions of the distance product besides the model dtype (None).
+_ASSIGN_DTYPES = (torch.bfloat16,)
 
 
 class MiniBatchKMeans:
@@ -207,6 +209,7 @@ class MiniBatchKMeans:
         device: torch.device = torch.device("cpu"),
         dtype: torch.dtype = torch.float32,
         assignment_backend: str = _DEFAULT_ASSIGNMENT_BACKEND,
+        assign_dtype: torch.dtype | None = None,
     ):
         """
         Parameters
@@ -248,6 +251,17 @@ class MiniBatchKMeans:
             newer, and raises ``RuntimeError`` unless the model is on CUDA
             with ``torch.float32``. Results agree up to floating-point
             summation order.
+
+        **assign_dtype** (`torch.dtype` or ``None``, default ``None``):
+            Precision of the distance product that assigns rows to centers.
+            ``None``: the model ``dtype``. ``torch.bfloat16``: both operands
+            are rounded to bfloat16 (after subtracting the centers' mean) and
+            the products accumulate in float32, on tensor cores; several times
+            faster. Only ``assignment_backend="triton"`` supports it, and
+            another backend raises ``RuntimeError`` at the first assignment.
+            Centers, counts and norms stay in ``dtype``, but labels come from
+            the rounded products, so near-ties may resolve differently and
+            inertia is approximate.
         """
         self.n_clusters = n_clusters
         self.verbose = bool(verbose)
@@ -265,6 +279,7 @@ class MiniBatchKMeans:
         self.device = device
         self.dtype = dtype
         self.assignment_backend = assignment_backend
+        self.assign_dtype = assign_dtype
         self._cluster_centers: torch.Tensor | None = None
 
     @property
@@ -280,6 +295,18 @@ class MiniBatchKMeans:
                 f"assignment_backend must be one of {_ASSIGNMENT_BACKENDS}, got {value!r}."
             )
         self._assignment_backend = value
+
+    @property
+    def assign_dtype(self) -> torch.dtype | None:
+        """``None`` or ``torch.bfloat16``; see the constructor."""
+        # Objects pickled before this option existed have no such attribute.
+        return getattr(self, "_assign_dtype", None)
+
+    @assign_dtype.setter
+    def assign_dtype(self, value: torch.dtype | None) -> None:
+        if value is not None and value not in _ASSIGN_DTYPES:
+            raise ValueError(f"assign_dtype must be None or torch.bfloat16, got {value!r}.")
+        self._assign_dtype = value
 
     @property
     def cluster_centers(self) -> torch.Tensor:
@@ -333,14 +360,27 @@ class MiniBatchKMeans:
     def _fused_assign(
         self, X: torch.Tensor, C: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """``(partial, labels)`` from the fused kernel under ``"triton"``, else ``None``."""
+        """``(partial, labels)`` from the fused kernel under ``"triton"``, else ``None``.
+
+        ``assign_dtype`` picks the kernel's precision; it needs ``"triton"``.
+        """
         if self.assignment_backend != "triton":
+            if self.assign_dtype is not None:
+                raise RuntimeError(
+                    f"assign_dtype={self.assign_dtype} needs assignment_backend="
+                    f'"triton", got "{self.assignment_backend}".'
+                )
             return None
         from . import _triton_assign as fused  # only "triton" imports Triton
 
         reason = fused.unsupported_reason(X, C)
         if reason is not None:
-            raise RuntimeError(f'assignment_backend="triton" cannot run: {reason}.')
+            setting = 'assignment_backend="triton"'
+            if self.assign_dtype is not None:
+                setting += f" with assign_dtype={self.assign_dtype}"
+            raise RuntimeError(f"{setting} cannot run: {reason}.")
+        if self.assign_dtype is not None:
+            return fused.nearest_centroid_bf16(X, C)
         return fused.nearest_centroid(X, C)
 
     def _check_input(self, X: torch.Tensor, predict: bool = False) -> None:
@@ -814,6 +854,7 @@ class MiniBatchKMeans:
         map_location: str | torch.device | None = None,
         device: torch.device | None = None,
         assignment_backend: str = _DEFAULT_ASSIGNMENT_BACKEND,
+        assign_dtype: torch.dtype | None = None,
         verbose: int = 0,
     ) -> "MiniBatchKMeans":
         """Load an estimator previously written with :meth:`save`.
@@ -839,6 +880,10 @@ class MiniBatchKMeans:
             Backend of the loaded model. Like ``device``, it describes the
             machine the model runs on, not the model, so it is not stored in
             the checkpoint: pass it again when you want the kernel.
+
+        **assign_dtype** (`torch.dtype` or ``None``, default ``None``):
+            Precision of the loaded model's assignment; not stored in the
+            checkpoint either. See the constructor.
 
         **verbose** (`int`, default ``0``):
             Verbosity of the loaded model.
@@ -883,6 +928,7 @@ class MiniBatchKMeans:
             device=target_device,
             dtype=dtype,
             assignment_backend=assignment_backend,
+            assign_dtype=assign_dtype,
         )
         if payload["fitted"]:
             centers = payload["cluster_centers"].to(device=target_device, dtype=dtype)

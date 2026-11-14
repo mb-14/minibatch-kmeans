@@ -1,4 +1,4 @@
-"""Fused Triton assignment kernel (CUDA, float32)."""
+"""Fused Triton assignment kernel (CUDA; float32 and bfloat16 products)."""
 
 import contextlib
 import os
@@ -316,6 +316,166 @@ assert "minibatch_kmeans._triton_assign" not in sys.modules
             back = MiniBatchKMeans.load(path, assignment_backend="triton")
             self.assertEqual(back.assignment_backend, "triton")
             torch.testing.assert_close(back.cluster_centers, km.cluster_centers)
+
+
+class TestAssignDtype(unittest.TestCase):
+    def test_default_is_none(self):
+        self.assertIsNone(MiniBatchKMeans(4).assign_dtype)
+
+    def test_bad_value_raises(self):
+        for bad in (torch.float16, torch.float32, "bfloat16"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                MiniBatchKMeans(4, assign_dtype=bad)
+
+    def test_needs_the_triton_backend(self):
+        X = torch.randn(64, 4)
+        km = MiniBatchKMeans(4, assign_dtype=torch.bfloat16)
+        for train in ("fit", "partial_fit"):
+            with (
+                self.subTest(train),
+                self.assertRaisesRegex(RuntimeError, 'needs assignment_backend="triton"'),
+            ):
+                getattr(km, train)(X)
+
+    def test_triton_raises_where_it_cannot_run(self):
+        km = MiniBatchKMeans(4, assignment_backend="triton", assign_dtype=torch.bfloat16)
+        with self.assertRaisesRegex(RuntimeError, _why("not a CUDA")) as caught:
+            km.fit(torch.randn(64, 4))
+        self.assertIn("assign_dtype=torch.bfloat16", str(caught.exception))
+
+    def test_object_pickled_before_the_option_existed(self):
+        X = torch.randn(64, 4)
+        km = MiniBatchKMeans(4)
+        km.fit(X, batch_size=32, max_iter=1)
+        del km._assign_dtype  # such an object has no such attribute after unpickling
+        self.assertIsNone(km.assign_dtype)
+        self.assertEqual(km.predict(X).shape, (64,))
+
+    def test_not_saved_and_load_chooses_it(self):
+        X = torch.randn(64, 4)
+        km = MiniBatchKMeans(4)
+        km.fit(X, batch_size=32, max_iter=1)
+        km.assign_dtype = torch.bfloat16  # set after a CPU fit, which bf16 cannot run
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.pt")
+            km.save(path)
+            self.assertNotIn("assign_dtype", torch.load(path, weights_only=False))
+            self.assertIsNone(MiniBatchKMeans.load(path).assign_dtype)
+            back = MiniBatchKMeans.load(path, assign_dtype=torch.bfloat16)
+            self.assertEqual(back.assign_dtype, torch.bfloat16)
+
+
+def _rounded_reference(X, C):
+    """Squared distances from the bfloat16-rounded, shifted operands (float64 sums)."""
+    mu = ta._bf16_shift(C)
+    Xs, Cs = X - mu, C - mu
+    Xh, Ch = Xs.bfloat16().double(), Cs.bfloat16().double()
+    partial = Ch.square().sum(1)[None, :] - 2 * Xh @ Ch.T
+    return partial + Xs.double().square().sum(1, keepdim=True)
+
+
+# GPU only: Triton's interpreter (3.6) gets bfloat16 wrong (tl.dot reads the
+# operands' bits as another type, and casts truncate instead of rounding).
+@unittest.skipUnless(CUDA_KERNEL, NEEDS_CUDA_KERNEL)
+class TestBf16Kernel(KernelTestCase):
+    def _data(self, n, k, d, offset=0.0, seed=0):
+        g = torch.Generator(device="cuda").manual_seed(seed)
+        X = torch.randn(n, d, device="cuda", generator=g) + offset
+        C = torch.randn(k, d, device="cuda", generator=g) + offset
+        return X, C
+
+    def test_matches_rounded_reference(self):
+        for n, k, d in SHAPES:
+            with self.subTest(n=n, k=k, d=d):
+                X, C = self._data(n, k, d)
+                ref = _rounded_reference(X, C)
+                partial, labels = ta.nearest_centroid_bf16(X, C)
+                self.assertEqual((labels.dtype, labels.shape), (torch.int64, (n,)))
+                # Only float32 accumulation order separates the kernel from the
+                # reference, so a differing label must be a near-tie there.
+                best = ref.min(1).values
+                chosen = ref.gather(1, labels[:, None]).squeeze(1)
+                tol = 1e-5 * (best.abs() + X.square().sum(1).double()) + 1e-4
+                self.assertTrue(bool(((chosen - best).abs() <= tol).all()))
+                # partial + ||x||^2 cancels in float32, as on the float32 path.
+                x_sq = row_sq_norms(X)
+                torch.testing.assert_close(
+                    (partial + x_sq).double(),
+                    chosen,
+                    rtol=1e-4,
+                    atol=1e-6 * x_sq.sum().item() + 1e-3,
+                )
+
+    def test_offset_data_keeps_relative_error(self):
+        # Without the shift, rounding 1000 + noise to 8 mantissa bits would
+        # erase the noise; with it, labels track the float32 argmin closely.
+        X, C = self._data(2000, 64, 16, offset=1000.0)
+        true = torch.cdist(X.double(), C.double()).square()
+        _, labels = ta.nearest_centroid_bf16(X, C)
+        agree = (labels == true.argmin(1)).double().mean().item()
+        self.assertGreater(agree, 0.97)
+        excess = true.gather(1, labels[:, None]).squeeze(1) / true.min(1).values - 1
+        self.assertLess(excess.max().item(), 0.05)
+
+    def test_one_center_far_from_the_origin(self):
+        # No spread to snap the shift to: it must stay finite.
+        X, _ = self._data(50, 1, 8, offset=1000.0)
+        C = X[:1].clone()
+        partial, labels = ta.nearest_centroid_bf16(X, C)
+        self.assertTrue(bool((labels == 0).all()))
+        x_sq = row_sq_norms(X)
+        exact = (X - C).square().sum(1)
+        # partial + ||x||^2 cancels in float32 (||x||^2 is about 8e6 here).
+        torch.testing.assert_close(partial + x_sq, exact, rtol=0, atol=1e-6 * x_sq.max().item())
+
+    def test_same_form_as_the_float32_kernel(self):
+        # Both return ||c||^2 - 2 x.c at the chosen center, so callers add ||x||^2 alike.
+        X, C = self._data(400, 50, 24, offset=3.0)
+        p16, l16 = ta.nearest_centroid_bf16(X, C)
+        p32, l32 = ta.nearest_centroid(X, C)
+        same = l16 == l32
+        self.assertGreater(same.double().mean().item(), 0.95)
+        # bfloat16 rounding moves partial a little; the wrong form would be off
+        # by about ||x||^2 (or 2 x.mu), far more than 1% of it.
+        gap = (p16 - p32).abs()[same]
+        self.assertTrue(bool((gap < 0.01 * row_sq_norms(X)[same]).all()))
+
+    def test_empty_input(self):
+        X, C = self._data(0, 5, 8)
+        partial, labels = ta.nearest_centroid_bf16(X, C)
+        self.assertEqual((partial.shape, labels.shape), ((0,), (0,)))
+
+
+@unittest.skipUnless(CUDA_KERNEL, NEEDS_CUDA_KERNEL)
+class TestBf16Backend(KernelTestCase):
+    def test_fit_and_inertia(self):
+        g = torch.Generator(device="cuda").manual_seed(0)
+        X = torch.randn(20000, 32, device="cuda", generator=g)
+        km = MiniBatchKMeans(
+            64,
+            device=torch.device("cuda"),
+            assignment_backend="triton",
+            assign_dtype=torch.bfloat16,
+            random_state=torch.Generator().manual_seed(0),
+        )
+        km.fit(X, batch_size=2048, max_iter=3, max_no_improvement=None)
+        labels, inertia = km._labels_inertia(X)
+        exact = torch.cdist(X.double(), km.cluster_centers.double()).square()
+        self.assertGreater((labels == exact.argmin(1)).double().mean().item(), 0.97)
+        self.assertAlmostEqual(inertia / exact.min(1).values.sum().item(), 1.0, delta=1e-3)
+        torch.testing.assert_close(km.predict(X), labels)
+
+    def test_float32_model_unchanged_by_the_option(self):
+        # The same model with assign_dtype=None goes through the float32 kernel.
+        g = torch.Generator(device="cuda").manual_seed(1)
+        X, C = (
+            torch.randn(500, 16, device="cuda", generator=g),
+            torch.randn(9, 16, device="cuda", generator=g),
+        )
+        km = MiniBatchKMeans(9, device=torch.device("cuda"), assignment_backend="triton")
+        km._cluster_centers = C
+        labels, _ = km._labels_inertia(X)
+        torch.testing.assert_close(labels, ta.nearest_centroid(X, C)[1])
 
 
 if __name__ == "__main__":
