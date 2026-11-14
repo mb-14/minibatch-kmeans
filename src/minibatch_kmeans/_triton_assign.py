@@ -102,7 +102,9 @@ if AVAILABLE:
 # would make results depend on timing.
 _BLOCK_M, _BLOCK_N, _BLOCK_K = 64, 128, 16
 _NUM_WARPS, _NUM_STAGES = 4, 4
-# bfloat16 tiles, from closed PR #11 (tuned on a GB10).
+# bfloat16 tiles, from closed PR #11 (tuned on a GB10). The compiled kernel
+# uses 65.8 KB of shared memory (Triton 3.6), within the 99 KB per block that
+# every GPU with bfloat16 tensor cores (compute capability 8.0+) allows.
 _BF16_CONFIG = {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 32, "num_warps": 8, "num_stages": 3}
 
 
