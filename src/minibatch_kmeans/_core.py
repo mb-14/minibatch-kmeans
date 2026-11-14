@@ -176,7 +176,7 @@ def _pairwise_squared_distances(X: torch.Tensor, C: torch.Tensor) -> torch.Tenso
     return torch.addmm(c_sq, X, C.T, beta=1, alpha=-2).add_(x_sq)
 
 
-_ASSIGNMENT_BACKENDS = ("native", "triton")
+_ASSIGNMENT_BACKENDS = ("native", "triton", "triton_bf16")
 _DEFAULT_ASSIGNMENT_BACKEND = "native"
 
 
@@ -247,7 +247,13 @@ class MiniBatchKMeans:
             kernel that never stores that matrix. It needs Triton 3.0 or
             newer, and raises ``RuntimeError`` unless the model is on CUDA
             with ``torch.float32``. Results agree up to floating-point
-            summation order.
+            summation order. ``"triton_bf16"``: the same kernel with both
+            operands of the distance product rounded to bfloat16 (after
+            subtracting the centers' mean) and float32 accumulation; it runs
+            on tensor cores, several times faster than ``"triton"``. Centers,
+            counts and norms stay float32, but labels come from the rounded
+            products, so near-ties may resolve differently and inertia is
+            approximate. Same requirements as ``"triton"``.
         """
         self.n_clusters = n_clusters
         self.verbose = bool(verbose)
@@ -269,7 +275,7 @@ class MiniBatchKMeans:
 
     @property
     def assignment_backend(self) -> str:
-        """``"native"`` or ``"triton"``; see the constructor."""
+        """``"native"``, ``"triton"`` or ``"triton_bf16"``; see the constructor."""
         # Objects pickled before this option existed have no such attribute.
         return getattr(self, "_assignment_backend", _DEFAULT_ASSIGNMENT_BACKEND)
 
@@ -321,6 +327,11 @@ class MiniBatchKMeans:
         """
         with nvtx_range("minibatch_kmeans:_labels_inertia", X.device):
             C = self._cluster_centers
+            if self.assignment_backend == "triton_bf16":
+                dist, labels = self._fused_module(X, C).nearest_centroid_bf16(
+                    X, C, return_dist=return_inertia
+                )
+                return labels, (dist.sum().item() if return_inertia else None)
             fused = self._fused_assign(X, C)
             if fused is not None:
                 partial, labels = fused
@@ -344,12 +355,18 @@ class MiniBatchKMeans:
         """``(partial, labels)`` from the fused kernel under ``"triton"``, else ``None``."""
         if self.assignment_backend != "triton":
             return None
-        from . import _triton_assign as fused  # only "triton" imports Triton
+        return self._fused_module(X, C).nearest_centroid(X, C)
+
+    def _fused_module(self, X: torch.Tensor, C: torch.Tensor):
+        """The kernel module, after checking it can run on ``X`` and ``C``."""
+        from . import _triton_assign as fused  # only the Triton backends import Triton
 
         reason = fused.unsupported_reason(X, C)
         if reason is not None:
-            raise RuntimeError(f'assignment_backend="triton" cannot run: {reason}.')
-        return fused.nearest_centroid(X, C)
+            raise RuntimeError(
+                f'assignment_backend="{self.assignment_backend}" cannot run: {reason}.'
+            )
+        return fused
 
     def _check_input(self, X: torch.Tensor, predict: bool = False) -> None:
         """Validate ``X``; once fitted, its column count must match the centers."""

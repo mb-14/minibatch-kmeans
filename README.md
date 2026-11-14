@@ -87,8 +87,11 @@ The kernel handles `torch.float32` data only.
 | --- | --- |
 | `"native"` (default) | Always PyTorch. |
 | `"triton"` | Always the kernel. Raises an error that says why if it cannot run. |
+| `"triton_bf16"` | The kernel with the distance product in bfloat16 (float32 accumulation), on tensor cores. Same requirements as `"triton"`. |
 
-Both backends give the same results up to floating-point rounding: a point almost exactly between two centers may be assigned to either. The first use in a process takes a moment while the kernel loads.
+`"native"` and `"triton"` give the same results up to floating-point rounding: a point almost exactly between two centers may be assigned to either. The first use in a process takes a moment while the kernel loads.
+
+`"triton_bf16"` is about 5× faster than `"triton"` on a GB10 (1M rows, 16384 centers, 96 features: 0.07 s vs 0.37 s per pass). Both operands are first shifted by the centers' mean, so rounding error scales with the spread of the data rather than its distance from the origin. Centers, counts and norms stay `float32`, but which center is nearest comes from the rounded products: on four embedding datasets (96 to 1024 features) 99.75–99.91% of points got the same center as with `"triton"`, and the reported inertia is approximate.
 
 ### Incremental training
 

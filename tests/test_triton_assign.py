@@ -1,4 +1,4 @@
-"""Fused Triton assignment kernel (CUDA, float32)."""
+"""Fused Triton assignment kernel (CUDA; float32 and bfloat16 products)."""
 
 import contextlib
 import os
@@ -310,6 +310,96 @@ assert "minibatch_kmeans._triton_assign" not in sys.modules
             back = MiniBatchKMeans.load(path, assignment_backend="triton")
             self.assertEqual(back.assignment_backend, "triton")
             torch.testing.assert_close(back.cluster_centers, km.cluster_centers)
+
+
+def _rounded_reference(X, C):
+    """Squared distances from the bfloat16-rounded, shifted operands (float64 sums)."""
+    mu = ta._bf16_shift(C)
+    Xs, Cs = X - mu, C - mu
+    Xh, Ch = Xs.bfloat16().double(), Cs.bfloat16().double()
+    partial = Ch.square().sum(1)[None, :] - 2 * Xh @ Ch.T
+    return partial + Xs.double().square().sum(1, keepdim=True)
+
+
+# GPU only: Triton's interpreter (3.6) gets bfloat16 wrong (tl.dot reads the
+# operands' bits as another type, and casts truncate instead of rounding).
+@unittest.skipUnless(CUDA_KERNEL, NEEDS_CUDA_KERNEL)
+class TestBf16Kernel(KernelTestCase):
+    def _data(self, n, k, d, offset=0.0, seed=0):
+        g = torch.Generator(device="cuda").manual_seed(seed)
+        X = torch.randn(n, d, device="cuda", generator=g) + offset
+        C = torch.randn(k, d, device="cuda", generator=g) + offset
+        return X, C
+
+    def test_matches_rounded_reference(self):
+        for n, k, d in SHAPES:
+            with self.subTest(n=n, k=k, d=d):
+                X, C = self._data(n, k, d)
+                ref = _rounded_reference(X, C)
+                dist, labels = ta.nearest_centroid_bf16(X, C)
+                self.assertEqual((labels.dtype, labels.shape), (torch.int64, (n,)))
+                # Only float32 accumulation order separates the kernel from the
+                # reference, so a differing label must be a near-tie there.
+                best = ref.min(1).values
+                chosen = ref.gather(1, labels[:, None]).squeeze(1)
+                tol = 1e-5 * (best.abs() + X.square().sum(1).double()) + 1e-4
+                self.assertTrue(bool(((chosen - best).abs() <= tol).all()))
+                torch.testing.assert_close(dist.double(), chosen, rtol=1e-4, atol=1e-3)
+
+    def test_offset_data_keeps_relative_error(self):
+        # Without the shift, rounding 1000 + noise to 8 mantissa bits would
+        # erase the noise; with it, labels track the float32 argmin closely.
+        X, C = self._data(2000, 64, 16, offset=1000.0)
+        true = torch.cdist(X.double(), C.double()).square()
+        _, labels = ta.nearest_centroid_bf16(X, C)
+        agree = (labels == true.argmin(1)).double().mean().item()
+        self.assertGreater(agree, 0.97)
+        excess = true.gather(1, labels[:, None]).squeeze(1) / true.min(1).values - 1
+        self.assertLess(excess.max().item(), 0.05)
+
+    def test_one_center_far_from_the_origin(self):
+        # No spread to snap the shift to: it must stay finite.
+        X, _ = self._data(50, 1, 8, offset=1000.0)
+        C = X[:1].clone()
+        dist, labels = ta.nearest_centroid_bf16(X, C)
+        self.assertTrue(bool((labels == 0).all()))
+        exact = (X - C).square().sum(1)
+        torch.testing.assert_close(dist, exact, rtol=1e-2, atol=1e-2)
+
+    def test_without_distances(self):
+        X, C = self._data(300, 40, 24)
+        dist, labels = ta.nearest_centroid_bf16(X, C, return_dist=False)
+        self.assertIsNone(dist)
+        torch.testing.assert_close(labels, ta.nearest_centroid_bf16(X, C)[1])
+
+    def test_empty_input(self):
+        X, C = self._data(0, 5, 8)
+        dist, labels = ta.nearest_centroid_bf16(X, C)
+        self.assertEqual((dist.shape, labels.shape), ((0,), (0,)))
+
+
+@unittest.skipUnless(CUDA_KERNEL, NEEDS_CUDA_KERNEL)
+class TestBf16Backend(KernelTestCase):
+    def test_fit_and_inertia(self):
+        g = torch.Generator(device="cuda").manual_seed(0)
+        X = torch.randn(20000, 32, device="cuda", generator=g)
+        km = MiniBatchKMeans(
+            64,
+            device=torch.device("cuda"),
+            assignment_backend="triton_bf16",
+            random_state=torch.Generator().manual_seed(0),
+        )
+        km.fit(X, batch_size=2048, max_iter=3, max_no_improvement=None)
+        labels, inertia = km._labels_inertia(X)
+        exact = torch.cdist(X.double(), km.cluster_centers.double()).square()
+        self.assertGreater((labels == exact.argmin(1)).double().mean().item(), 0.97)
+        self.assertAlmostEqual(inertia / exact.min(1).values.sum().item(), 1.0, delta=1e-3)
+        torch.testing.assert_close(km.predict(X), labels)
+
+    def test_raises_where_it_cannot_run(self):
+        km = MiniBatchKMeans(4, assignment_backend="triton_bf16")
+        with self.assertRaisesRegex(RuntimeError, 'triton_bf16" cannot run'):
+            km.fit(torch.randn(64, 4))
 
 
 if __name__ == "__main__":
