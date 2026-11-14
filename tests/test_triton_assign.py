@@ -312,6 +312,52 @@ assert "minibatch_kmeans._triton_assign" not in sys.modules
             torch.testing.assert_close(back.cluster_centers, km.cluster_centers)
 
 
+class TestAssignDtype(unittest.TestCase):
+    def test_default_is_none(self):
+        self.assertIsNone(MiniBatchKMeans(4).assign_dtype)
+
+    def test_bad_value_raises(self):
+        for bad in (torch.float16, torch.float32, "bfloat16"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                MiniBatchKMeans(4, assign_dtype=bad)
+
+    def test_needs_the_triton_backend(self):
+        X = torch.randn(64, 4)
+        km = MiniBatchKMeans(4, assign_dtype=torch.bfloat16)
+        for train in ("fit", "partial_fit"):
+            with (
+                self.subTest(train),
+                self.assertRaisesRegex(RuntimeError, 'needs assignment_backend="triton"'),
+            ):
+                getattr(km, train)(X)
+
+    def test_triton_raises_where_it_cannot_run(self):
+        km = MiniBatchKMeans(4, assignment_backend="triton", assign_dtype=torch.bfloat16)
+        with self.assertRaisesRegex(RuntimeError, _why("not a CUDA")):
+            km.fit(torch.randn(64, 4))
+
+    def test_object_pickled_before_the_option_existed(self):
+        X = torch.randn(64, 4)
+        km = MiniBatchKMeans(4)
+        km.fit(X, batch_size=32, max_iter=1)
+        del km._assign_dtype  # such an object has no such attribute after unpickling
+        self.assertIsNone(km.assign_dtype)
+        self.assertEqual(km.predict(X).shape, (64,))
+
+    def test_not_saved_and_load_chooses_it(self):
+        X = torch.randn(64, 4)
+        km = MiniBatchKMeans(4)
+        km.fit(X, batch_size=32, max_iter=1)
+        km.assign_dtype = torch.bfloat16  # set after a CPU fit, which bf16 cannot run
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.pt")
+            km.save(path)
+            self.assertNotIn("assign_dtype", torch.load(path, weights_only=False))
+            self.assertIsNone(MiniBatchKMeans.load(path).assign_dtype)
+            back = MiniBatchKMeans.load(path, assign_dtype=torch.bfloat16)
+            self.assertEqual(back.assign_dtype, torch.bfloat16)
+
+
 def _rounded_reference(X, C):
     """Squared distances from the bfloat16-rounded, shifted operands (float64 sums)."""
     mu = ta._bf16_shift(C)
@@ -386,7 +432,8 @@ class TestBf16Backend(KernelTestCase):
         km = MiniBatchKMeans(
             64,
             device=torch.device("cuda"),
-            assignment_backend="triton_bf16",
+            assignment_backend="triton",
+            assign_dtype=torch.bfloat16,
             random_state=torch.Generator().manual_seed(0),
         )
         km.fit(X, batch_size=2048, max_iter=3, max_no_improvement=None)
@@ -396,10 +443,17 @@ class TestBf16Backend(KernelTestCase):
         self.assertAlmostEqual(inertia / exact.min(1).values.sum().item(), 1.0, delta=1e-3)
         torch.testing.assert_close(km.predict(X), labels)
 
-    def test_raises_where_it_cannot_run(self):
-        km = MiniBatchKMeans(4, assignment_backend="triton_bf16")
-        with self.assertRaisesRegex(RuntimeError, 'triton_bf16" cannot run'):
-            km.fit(torch.randn(64, 4))
+    def test_float32_model_unchanged_by_the_option(self):
+        # The same model with assign_dtype=None goes through the float32 kernel.
+        g = torch.Generator(device="cuda").manual_seed(1)
+        X, C = (
+            torch.randn(500, 16, device="cuda", generator=g),
+            torch.randn(9, 16, device="cuda", generator=g),
+        )
+        km = MiniBatchKMeans(9, device=torch.device("cuda"), assignment_backend="triton")
+        km._cluster_centers = C
+        labels, _ = km._labels_inertia(X)
+        torch.testing.assert_close(labels, ta.nearest_centroid(X, C)[1])
 
 
 if __name__ == "__main__":
