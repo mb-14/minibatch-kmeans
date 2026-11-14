@@ -190,33 +190,20 @@ def _bf16_shift(C: torch.Tensor) -> torch.Tensor:
     return torch.where(torch.isfinite(snapped), snapped, mu)
 
 
-def nearest_centroid_bf16(
-    X: torch.Tensor, C: torch.Tensor, return_dist: bool = True
-) -> tuple[torch.Tensor | None, torch.Tensor]:
+def nearest_centroid_bf16(X: torch.Tensor, C: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Nearest row of ``C`` for each row of ``X``, from bfloat16 products.
 
     ``X`` and ``C`` (float32, CUDA) are shifted by :func:`_bf16_shift` and
     rounded to bfloat16; products accumulate in float32. Near-ties may resolve
-    differently from :func:`nearest_centroid`.
-
-    Returns
-    -------
-
-    **dist** (`torch.Tensor` or ``None``, shape ``(n,)``, float32):
-        Squared distance to the chosen centroid, from the rounded products
-        and float32 norms of the shifted rows; ``None`` if ``return_dist`` is false.
-
-    **labels** (`torch.Tensor`, shape ``(n,)``, int64):
-        Index of the minimizing centroid (lowest index on exact ties).
+    differently from :func:`nearest_centroid`. Same return values as
+    :func:`nearest_centroid`; ``partial`` comes from the rounded products.
     """
     if X.stride(1) != 1:
         X = X.contiguous()
     n, d = X.shape
     k = C.shape[0]
     if n == 0:
-        return X.new_empty(0) if return_dist else None, torch.empty(
-            0, dtype=torch.int64, device=X.device
-        )
+        return X.new_empty(0), torch.empty(0, dtype=torch.int64, device=X.device)
     mu = _bf16_shift(C).contiguous()
     Ch = (C - mu).to(torch.bfloat16).contiguous()
     c_sq = row_sq_norms(Ch.float())  # norms of the rounded centers, as in the products
@@ -239,6 +226,7 @@ def nearest_centroid_bf16(
             BF16=True,
             **cfg,
         )
-    if not return_dist:
-        return None, labels
-    return partial.add_(row_sq_norms(X - mu)), labels
+    # The kernel's minimum is over shifted points: ||c-mu||^2 - 2 (x-mu).(c-mu).
+    # Adding ||mu||^2 - 2 x.mu makes it ||c||^2 - 2 x.c, as nearest_centroid
+    # returns, without a shifted copy of X.
+    return partial.add_(mu.dot(mu) - 2 * (X @ mu)), labels

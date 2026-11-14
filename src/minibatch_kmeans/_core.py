@@ -348,16 +348,6 @@ class MiniBatchKMeans:
         """
         with nvtx_range("minibatch_kmeans:_labels_inertia", X.device):
             C = self._cluster_centers
-            if self.assign_dtype is not None:
-                if self.assignment_backend != "triton":
-                    raise RuntimeError(
-                        f"assign_dtype={self.assign_dtype} needs assignment_backend="
-                        f'"triton", got "{self.assignment_backend}".'
-                    )
-                dist, labels = self._fused_module(X, C).nearest_centroid_bf16(
-                    X, C, return_dist=return_inertia
-                )
-                return labels, (dist.sum().item() if return_inertia else None)
             fused = self._fused_assign(X, C)
             if fused is None:
                 # min returns the first minimal index, as argmin does.
@@ -370,19 +360,28 @@ class MiniBatchKMeans:
     def _fused_assign(
         self, X: torch.Tensor, C: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """``(partial, labels)`` from the fused kernel under ``"triton"``, else ``None``."""
-        if self.assignment_backend != "triton":
-            return None
-        return self._fused_module(X, C).nearest_centroid(X, C)
+        """``(partial, labels)`` from the fused kernel under ``"triton"``, else ``None``.
 
-    def _fused_module(self, X: torch.Tensor, C: torch.Tensor):
-        """The kernel module, after checking it can run on ``X`` and ``C``."""
+        ``assign_dtype`` picks the kernel's precision; it needs ``"triton"``.
+        """
+        if self.assignment_backend != "triton":
+            if self.assign_dtype is not None:
+                raise RuntimeError(
+                    f"assign_dtype={self.assign_dtype} needs assignment_backend="
+                    f'"triton", got "{self.assignment_backend}".'
+                )
+            return None
         from . import _triton_assign as fused  # only "triton" imports Triton
 
         reason = fused.unsupported_reason(X, C)
         if reason is not None:
-            raise RuntimeError(f'assignment_backend="triton" cannot run: {reason}.')
-        return fused
+            setting = 'assignment_backend="triton"'
+            if self.assign_dtype is not None:
+                setting += f" with assign_dtype={self.assign_dtype}"
+            raise RuntimeError(f"{setting} cannot run: {reason}.")
+        if self.assign_dtype is not None:
+            return fused.nearest_centroid_bf16(X, C)
+        return fused.nearest_centroid(X, C)
 
     def _check_input(self, X: torch.Tensor, predict: bool = False) -> None:
         """Validate ``X``; once fitted, its column count must match the centers."""

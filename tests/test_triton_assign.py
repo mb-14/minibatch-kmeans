@@ -339,8 +339,9 @@ class TestAssignDtype(unittest.TestCase):
 
     def test_triton_raises_where_it_cannot_run(self):
         km = MiniBatchKMeans(4, assignment_backend="triton", assign_dtype=torch.bfloat16)
-        with self.assertRaisesRegex(RuntimeError, _why("not a CUDA")):
+        with self.assertRaisesRegex(RuntimeError, _why("not a CUDA")) as caught:
             km.fit(torch.randn(64, 4))
+        self.assertIn("assign_dtype=torch.bfloat16", str(caught.exception))
 
     def test_object_pickled_before_the_option_existed(self):
         X = torch.randn(64, 4)
@@ -388,7 +389,7 @@ class TestBf16Kernel(KernelTestCase):
             with self.subTest(n=n, k=k, d=d):
                 X, C = self._data(n, k, d)
                 ref = _rounded_reference(X, C)
-                dist, labels = ta.nearest_centroid_bf16(X, C)
+                partial, labels = ta.nearest_centroid_bf16(X, C)
                 self.assertEqual((labels.dtype, labels.shape), (torch.int64, (n,)))
                 # Only float32 accumulation order separates the kernel from the
                 # reference, so a differing label must be a near-tie there.
@@ -396,7 +397,14 @@ class TestBf16Kernel(KernelTestCase):
                 chosen = ref.gather(1, labels[:, None]).squeeze(1)
                 tol = 1e-5 * (best.abs() + X.square().sum(1).double()) + 1e-4
                 self.assertTrue(bool(((chosen - best).abs() <= tol).all()))
-                torch.testing.assert_close(dist.double(), chosen, rtol=1e-4, atol=1e-3)
+                # partial + ||x||^2 cancels in float32, as on the float32 path.
+                x_sq = row_sq_norms(X)
+                torch.testing.assert_close(
+                    (partial + x_sq).double(),
+                    chosen,
+                    rtol=1e-4,
+                    atol=1e-6 * x_sq.sum().item() + 1e-3,
+                )
 
     def test_offset_data_keeps_relative_error(self):
         # Without the shift, rounding 1000 + noise to 8 mantissa bits would
@@ -413,21 +421,29 @@ class TestBf16Kernel(KernelTestCase):
         # No spread to snap the shift to: it must stay finite.
         X, _ = self._data(50, 1, 8, offset=1000.0)
         C = X[:1].clone()
-        dist, labels = ta.nearest_centroid_bf16(X, C)
+        partial, labels = ta.nearest_centroid_bf16(X, C)
         self.assertTrue(bool((labels == 0).all()))
+        x_sq = row_sq_norms(X)
         exact = (X - C).square().sum(1)
-        torch.testing.assert_close(dist, exact, rtol=1e-2, atol=1e-2)
+        # partial + ||x||^2 cancels in float32 (||x||^2 is about 8e6 here).
+        torch.testing.assert_close(partial + x_sq, exact, rtol=0, atol=1e-6 * x_sq.max().item())
 
-    def test_without_distances(self):
-        X, C = self._data(300, 40, 24)
-        dist, labels = ta.nearest_centroid_bf16(X, C, return_dist=False)
-        self.assertIsNone(dist)
-        torch.testing.assert_close(labels, ta.nearest_centroid_bf16(X, C)[1])
+    def test_same_form_as_the_float32_kernel(self):
+        # Both return ||c||^2 - 2 x.c at the chosen center, so callers add ||x||^2 alike.
+        X, C = self._data(400, 50, 24, offset=3.0)
+        p16, l16 = ta.nearest_centroid_bf16(X, C)
+        p32, l32 = ta.nearest_centroid(X, C)
+        same = l16 == l32
+        self.assertGreater(same.double().mean().item(), 0.95)
+        # bfloat16 rounding moves partial a little; the wrong form would be off
+        # by about ||x||^2 (or 2 x.mu), far more than 1% of it.
+        gap = (p16 - p32).abs()[same]
+        self.assertTrue(bool((gap < 0.01 * row_sq_norms(X)[same]).all()))
 
     def test_empty_input(self):
         X, C = self._data(0, 5, 8)
-        dist, labels = ta.nearest_centroid_bf16(X, C)
-        self.assertEqual((dist.shape, labels.shape), ((0,), (0,)))
+        partial, labels = ta.nearest_centroid_bf16(X, C)
+        self.assertEqual((partial.shape, labels.shape), ((0,), (0,)))
 
 
 @unittest.skipUnless(CUDA_KERNEL, NEEDS_CUDA_KERNEL)
