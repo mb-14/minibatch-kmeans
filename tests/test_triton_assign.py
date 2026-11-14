@@ -55,8 +55,13 @@ SHAPES = [
 ]
 
 
+def _squared_distances(X, C):
+    """The PyTorch path's distances, with ||x||^2 added to every entry."""
+    return core._partial_squared_distances(X, C) + X.square().sum(1, keepdim=True)
+
+
 def _check_against_reference(tc, X, C):
-    ref = core._pairwise_squared_distances(X, C)
+    ref = _squared_distances(X, C)
     ref_labels = ref.argmin(1)
     partial, labels = ta.nearest_centroid(X, C)
     tc.assertEqual(labels.dtype, torch.int64)
@@ -121,7 +126,7 @@ class TestKernelLogic(KernelTestCase):
             C = torch.randn(k, 16, device=KERNEL_DEVICE, generator=g)
             C[bad] = float("nan")
             partial, labels = ta.nearest_centroid(X, C)
-            torch.testing.assert_close(labels, core._pairwise_squared_distances(X, C).argmin(1))
+            torch.testing.assert_close(labels, _squared_distances(X, C).argmin(1))
             self.assertTrue(bool(partial.isnan().all()))
 
     def test_non_contiguous_rows(self):
@@ -169,7 +174,7 @@ class TestKernelCuda(KernelTestCase):
         with mock.patch.object(ta, "nearest_centroid", wraps=ta.nearest_centroid) as spy:
             labels, inertia = km._labels_inertia(X)
         spy.assert_called_once()
-        ref = core._pairwise_squared_distances(X, km._cluster_centers)
+        ref = _squared_distances(X, km._cluster_centers)
         best = ref.min(1).values
         chosen = ref.gather(1, labels[:, None]).squeeze(1)
         self.assertTrue(bool(((chosen - best).abs() <= 1e-5 * best.abs() + 1e-4).all()))
