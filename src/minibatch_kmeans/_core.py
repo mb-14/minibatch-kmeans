@@ -322,14 +322,10 @@ class MiniBatchKMeans:
         with nvtx_range("minibatch_kmeans:_labels_inertia", X.device):
             C = self._cluster_centers
             fused = self._fused_assign(X, C)
-            if fused is not None:
-                partial, labels = fused
-                if not return_inertia:
-                    return labels, None
-                return labels, partial.add_(row_sq_norms(X)).sum().item()
-
-            # min returns the first minimal index, as argmin does.
-            partial, labels = _partial_squared_distances(X, C).min(dim=1)
+            if fused is None:
+                # min returns the first minimal index, as argmin does.
+                fused = _partial_squared_distances(X, C).min(dim=1)
+            partial, labels = fused
             if not return_inertia:
                 return labels, None
             return labels, partial.add_(row_sq_norms(X)).sum().item()

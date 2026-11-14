@@ -17,6 +17,12 @@ def _model(C):
 
 
 class TestNativeAssign(unittest.TestCase):
+    def setUp(self):
+        # The float64 comparisons assume full float32 products on CUDA.
+        tf32 = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = False
+        self.addCleanup(setattr, torch.backends.cuda.matmul, "allow_tf32", tf32)
+
     def test_matches_float64_distances(self):
         for dev in DEVICES:
             with self.subTest(dev):
@@ -53,10 +59,12 @@ class TestNativeAssign(unittest.TestCase):
                 self.assertTrue(math.isnan(inertia))
 
     def test_without_inertia(self):
-        X, C = torch.randn(40, 3), torch.randn(5, 3)
-        labels, inertia = _model(C)._labels_inertia(X, return_inertia=False)
-        self.assertIsNone(inertia)
-        self.assertEqual(labels.tolist(), _model(C)._labels_inertia(X)[0].tolist())
+        for dev in DEVICES:
+            with self.subTest(dev):
+                X, C = torch.randn(40, 3, device=dev), torch.randn(5, 3, device=dev)
+                labels, inertia = _model(C)._labels_inertia(X, return_inertia=False)
+                self.assertIsNone(inertia)
+                torch.testing.assert_close(labels, _model(C)._labels_inertia(X)[0])
 
 
 if __name__ == "__main__":

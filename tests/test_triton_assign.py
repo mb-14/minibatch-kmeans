@@ -13,6 +13,7 @@ import torch
 from minibatch_kmeans import MiniBatchKMeans
 from minibatch_kmeans import _core as core
 from minibatch_kmeans import _triton_assign as ta
+from minibatch_kmeans._utils import row_sq_norms
 
 # TRITON_INTERPRET=1 runs the kernel on the CPU (CI has no GPU): the logic
 # tests then use CPU tensors, and tests that need a real GPU skip.
@@ -57,7 +58,7 @@ SHAPES = [
 
 def _squared_distances(X, C):
     """The PyTorch path's distances, with ||x||^2 added to every entry."""
-    return core._partial_squared_distances(X, C) + X.square().sum(1, keepdim=True)
+    return core._partial_squared_distances(X, C) + row_sq_norms(X, keepdim=True)
 
 
 def _check_against_reference(tc, X, C):
