@@ -165,15 +165,15 @@ class _BatchPrefetcher:
         torch.cuda.current_stream(self._device).wait_stream(self._copy_stream)
 
 
-def _pairwise_squared_distances(X: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
-    """Squared Euclidean distances from each row of ``X`` to each row of ``C``.
+def _partial_squared_distances(X: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
+    """``||c_j||^2 - 2 x_i.c_j`` for each row of ``X`` and each row of ``C``.
 
-    The row norms use one reduction each, and the cross term is a single
-    matrix product. That avoids a squared copy of ``X`` and a doubled copy of ``X``.
+    This is the squared distance minus ``||x_i||^2``, which is the same for
+    every center in a row, so it does not change which center is nearest.
+    One matrix product, and no pass over the ``(n, k)`` matrix to add
+    ``||x||^2``: callers add it to the row minimum only.
     """
-    x_sq = row_sq_norms(X, keepdim=True)
-    c_sq = row_sq_norms(C)
-    return torch.addmm(c_sq, X, C.T, beta=1, alpha=-2).add_(x_sq)
+    return torch.addmm(row_sq_norms(C), X, C.T, beta=1, alpha=-2)
 
 
 _ASSIGNMENT_BACKENDS = ("native", "triton")
@@ -359,21 +359,13 @@ class MiniBatchKMeans:
                 )
                 return labels, (dist.sum().item() if return_inertia else None)
             fused = self._fused_assign(X, C)
-            if fused is not None:
-                partial, labels = fused
-                if not return_inertia:
-                    return labels, None
-                return labels, partial.add_(row_sq_norms(X)).sum().item()
-
-            dist_sq = _pairwise_squared_distances(X, C)
-            labels = dist_sq.argmin(dim=1)
-
+            if fused is None:
+                # min returns the first minimal index, as argmin does.
+                fused = _partial_squared_distances(X, C).min(dim=1)
+            partial, labels = fused
             if not return_inertia:
                 return labels, None
-
-            # Reuse E-step distances: inertia = sum_i dist_sq[i, labels[i]]
-            inertia = dist_sq.gather(1, labels.unsqueeze(1)).squeeze(1).sum().item()
-            return labels, inertia
+            return labels, partial.add_(row_sq_norms(X)).sum().item()
 
     def _fused_assign(
         self, X: torch.Tensor, C: torch.Tensor
