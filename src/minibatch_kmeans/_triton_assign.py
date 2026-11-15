@@ -91,6 +91,23 @@ if AVAILABLE:
 # would make results depend on timing.
 _BLOCK_M, _BLOCK_N, _BLOCK_K = 64, 128, 16
 _NUM_WARPS, _NUM_STAGES = 4, 4
+# Triton vectorizes the row loads only when the feature count, the row stride
+# and the data pointer are divisible by _ALIGN (Triton's fixed divisibility
+# check); other inputs are copied into fresh rows zero-padded to a multiple of
+# _PAD_TO, which leaves every dot product unchanged. Padding to a multiple of
+# the feature tile keeps the tile boundaries, so the summation order, and the
+# result bits, match the unpadded run (_PAD_TO must stay a multiple of _ALIGN).
+# X is copied in chunks of at most _PAD_BYTES (256 MB), or of one row tile
+# when a tile is larger than that, so the copy stays bounded however many rows
+# X has; smaller chunks were slower at 1000 features. Chunks are whole row
+# tiles, which keeps every chunk's output pointers aligned (an unaligned one
+# compiles a second kernel variant). With fewer than _PAD_MIN_K centers the
+# kernel is short and the copy costs more than the faster loads save (up to
+# 1.8x slower at k=64), so X is only copied when its columns are not
+# contiguous. At 1024 centers padding breaks even at 200-1000 features and wins
+# below; small widths already win from about 400 centers.
+_ALIGN, _PAD_TO, _PAD_BYTES, _PAD_MIN_K = 16, _BLOCK_K, 1 << 28, 1024
+assert _PAD_TO % _ALIGN == 0
 
 
 def unsupported_reason(X: torch.Tensor, C: torch.Tensor) -> str | None:
@@ -124,17 +141,56 @@ def nearest_centroid(X: torch.Tensor, C: torch.Tensor) -> tuple[torch.Tensor, to
     **labels** (`torch.Tensor`, shape ``(n,)``, int64):
         Index of the minimizing centroid (lowest index on exact ties).
     """
-    if X.stride(1) != 1:
-        X = X.contiguous()
-    C = C.contiguous()
     n, d = X.shape
-    k = C.shape[0]
     if n == 0:
         return X.new_empty(0), torch.empty(0, dtype=torch.int64, device=X.device)
+    # The norms come from the unpadded, contiguous centers: zeros, or another
+    # memory layout, could change their rounding and with it the labels.
+    C = C.contiguous()
     c_sq = row_sq_norms(C)
     partial = torch.empty(n, device=X.device, dtype=torch.float32)
     labels = torch.empty(n, device=X.device, dtype=torch.int64)
+    pad = -d % _PAD_TO
+    if pad == 0 and _aligned(X):  # X is used as it is
+        if not _aligned(C):
+            C = _padded(C, 0)
+        _launch(X, C, c_sq, partial, labels)
+        return partial, labels
+    if X.stride(1) == 1 and C.shape[0] < _PAD_MIN_K:  # too few centers to pay for a copy
+        _launch(X, C, c_sq, partial, labels)
+        return partial, labels
+    if pad or not _aligned(C):
+        C = _padded(C, pad)
+    row_bytes = max(1, (d + pad) * X.element_size())  # d may be 0
+    rows = max(1, _PAD_BYTES // row_bytes // _BLOCK_M) * _BLOCK_M
+    for begin in range(0, n, rows):
+        end = min(begin + rows, n)
+        _launch(_padded(X[begin:end], pad), C, c_sq, partial[begin:end], labels[begin:end])
+    return partial, labels
 
+
+def _aligned(T: torch.Tensor) -> bool:
+    return T.stride(1) == 1 and T.stride(0) % _ALIGN == 0 and T.data_ptr() % _ALIGN == 0
+
+
+def _padded(T: torch.Tensor, pad: int) -> torch.Tensor:
+    """A fresh contiguous copy of ``T`` with ``pad`` zero columns appended."""
+    d = T.shape[1]
+    out = T.new_empty(T.shape[0], d + pad)
+    out[:, d:].zero_()  # only the pad columns: the rest is overwritten
+    out[:, :d] = T
+    return out
+
+
+def _launch(
+    X: torch.Tensor,
+    C: torch.Tensor,
+    c_sq: torch.Tensor,
+    partial: torch.Tensor,
+    labels: torch.Tensor,
+) -> None:
+    """Run the kernel on ``X`` and ``C`` with unit column stride, writing ``partial`` and ``labels``."""
+    n, d = X.shape
     # Launch on X's device and its current stream, which the prefetcher waits on.
     with torch.cuda.device(X.device):
         _assign_kernel[(triton.cdiv(n, _BLOCK_M),)](
@@ -144,7 +200,7 @@ def nearest_centroid(X: torch.Tensor, C: torch.Tensor) -> tuple[torch.Tensor, to
             partial,
             labels,
             n,
-            k,
+            C.shape[0],
             d,
             X.stride(0),
             C.stride(0),
@@ -154,4 +210,3 @@ def nearest_centroid(X: torch.Tensor, C: torch.Tensor) -> tuple[torch.Tensor, to
             num_warps=_NUM_WARPS,
             num_stages=_NUM_STAGES,
         )
-    return partial, labels
