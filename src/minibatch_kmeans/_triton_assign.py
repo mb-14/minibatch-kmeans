@@ -102,10 +102,36 @@ if AVAILABLE:
 # would make results depend on timing.
 _BLOCK_M, _BLOCK_N, _BLOCK_K = 64, 128, 16
 _NUM_WARPS, _NUM_STAGES = 4, 4
+_FP32_CONFIG = {
+    "BLOCK_M": _BLOCK_M,
+    "BLOCK_N": _BLOCK_N,
+    "BLOCK_K": _BLOCK_K,
+    "num_warps": _NUM_WARPS,
+    "num_stages": _NUM_STAGES,
+}
 # bfloat16 tiles, from closed PR #11 (tuned on a GB10). The compiled kernel
 # uses 65.8 KB of shared memory (Triton 3.6), within the 99 KB per block that
 # every GPU with bfloat16 tensor cores (compute capability 8.0+) allows.
 _BF16_CONFIG = {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 32, "num_warps": 8, "num_stages": 3}
+# Triton vectorizes the row loads only when the feature count, the row stride
+# and the data pointer are divisible by _ALIGN (Triton's fixed divisibility
+# check); other inputs are copied into fresh rows zero-padded to a multiple of
+# the feature tile (_PAD_TO, _BF16_PAD_TO), which leaves every dot product
+# unchanged. Padding to a multiple of the feature tile keeps the tile
+# boundaries, so the summation order, and the result bits, match the unpadded
+# run (the pad widths must stay multiples of _ALIGN).
+# X is copied in chunks of at most _PAD_BYTES (256 MB), or of one row tile
+# when a tile is larger than that, so the copy stays bounded however many rows
+# X has; smaller chunks were slower at 1000 features. Chunks are whole row
+# tiles, which keeps every chunk's output pointers aligned (an unaligned one
+# compiles a second kernel variant). With fewer than _PAD_MIN_K centers the
+# float32 kernel is short and the copy costs more than the faster loads save
+# (up to 1.8x slower at k=64), so X is only copied when its columns are not
+# contiguous. At 1024 centers padding breaks even at 200-1000 features and wins
+# below; small widths already win from about 400 centers.
+_ALIGN, _PAD_TO, _PAD_BYTES, _PAD_MIN_K = 16, _BLOCK_K, 1 << 28, 1024
+_BF16_PAD_TO, _BF16_PAD_MIN_K = _BF16_CONFIG["BLOCK_K"], 1024
+assert _PAD_TO % _ALIGN == 0 and _BF16_PAD_TO % _ALIGN == 0
 
 
 def unsupported_reason(X: torch.Tensor, C: torch.Tensor) -> str | None:
@@ -139,39 +165,10 @@ def nearest_centroid(X: torch.Tensor, C: torch.Tensor) -> tuple[torch.Tensor, to
     **labels** (`torch.Tensor`, shape ``(n,)``, int64):
         Index of the minimizing centroid (lowest index on exact ties).
     """
-    if X.stride(1) != 1:
-        X = X.contiguous()
+    # The norms come from the unpadded, contiguous centers: zeros, or another
+    # memory layout, could change their rounding and with it the labels.
     C = C.contiguous()
-    n, d = X.shape
-    k = C.shape[0]
-    if n == 0:
-        return X.new_empty(0), torch.empty(0, dtype=torch.int64, device=X.device)
-    c_sq = row_sq_norms(C)
-    partial = torch.empty(n, device=X.device, dtype=torch.float32)
-    labels = torch.empty(n, device=X.device, dtype=torch.int64)
-
-    # Launch on X's device and its current stream, which the prefetcher waits on.
-    with torch.cuda.device(X.device):
-        _assign_kernel[(triton.cdiv(n, _BLOCK_M),)](
-            X,
-            c_sq,  # unused (BF16=False)
-            C,
-            c_sq,
-            partial,
-            labels,
-            n,
-            k,
-            d,
-            X.stride(0),
-            C.stride(0),
-            BLOCK_M=_BLOCK_M,
-            BLOCK_N=_BLOCK_N,
-            BLOCK_K=_BLOCK_K,
-            BF16=False,
-            num_warps=_NUM_WARPS,
-            num_stages=_NUM_STAGES,
-        )
-    return partial, labels
+    return _assign(X, C, row_sq_norms(C), None, _FP32_CONFIG, _PAD_TO, _PAD_MIN_K)
 
 
 def _bf16_shift(C: torch.Tensor) -> torch.Tensor:
@@ -186,6 +183,8 @@ def _bf16_shift(C: torch.Tensor) -> torch.Tensor:
     (From closed PR #13.)
     """
     mu = torch.nan_to_num(C.nanmean(0))
+    if mu.numel() == 0:  # no features
+        return mu
     spread = torch.nan_to_num(C - mu).abs().amax()
     step = torch.exp2(torch.floor(torch.log2(spread.clamp(min=torch.finfo(C.dtype).tiny))))
     snapped = torch.round(mu / step) * step
@@ -200,35 +199,104 @@ def nearest_centroid_bf16(X: torch.Tensor, C: torch.Tensor) -> tuple[torch.Tenso
     differently from :func:`nearest_centroid`. Same return values as
     :func:`nearest_centroid`; ``partial`` comes from the rounded products.
     """
+    if X.shape[0] == 0:
+        return X.new_empty(0), torch.empty(0, dtype=torch.int64, device=X.device)
+    # The shift (a mean over C) and the X @ mu correction below round
+    # differently on other memory layouts, so both start from contiguous rows.
+    C = C.contiguous()
     if X.stride(1) != 1:
         X = X.contiguous()
-    n, d = X.shape
-    k = C.shape[0]
-    if n == 0:
-        return X.new_empty(0), torch.empty(0, dtype=torch.int64, device=X.device)
-    mu = _bf16_shift(C).contiguous()
+    mu = _bf16_shift(C)
     Ch = (C - mu).to(torch.bfloat16).contiguous()
     c_sq = row_sq_norms(Ch.float())  # norms of the rounded centers, as in the products
-    partial = torch.empty(n, device=X.device, dtype=torch.float32)
-    labels = torch.empty(n, device=X.device, dtype=torch.int64)
-    cfg = _BF16_CONFIG
-    with torch.cuda.device(X.device):
-        _assign_kernel[(triton.cdiv(n, cfg["BLOCK_M"]),)](
-            X,
-            mu,
-            Ch,
-            c_sq,
-            partial,
-            labels,
-            n,
-            k,
-            d,
-            X.stride(0),
-            Ch.stride(0),
-            BF16=True,
-            **cfg,
-        )
+    partial, labels = _assign(X, Ch, c_sq, mu, _BF16_CONFIG, _BF16_PAD_TO, _BF16_PAD_MIN_K)
     # The kernel's minimum is over shifted points: ||c-mu||^2 - 2 (x-mu).(c-mu).
     # Adding ||mu||^2 - 2 x.mu makes it ||c||^2 - 2 x.c, as nearest_centroid
     # returns, without a shifted copy of X.
     return partial.add_(mu.dot(mu) - 2 * (X @ mu)), labels
+
+
+def _assign(
+    X: torch.Tensor,
+    C: torch.Tensor,
+    c_sq: torch.Tensor,
+    mu: torch.Tensor | None,
+    cfg: dict,
+    pad_to: int,
+    min_k: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Launch the kernel on ``X`` and the contiguous, kernel-ready centers ``C``,
+    zero-padding the features as the comment on ``_ALIGN`` describes.
+
+    ``mu`` is the bfloat16 shift (padded with zeros, so pad columns stay 0
+    after the shift), or ``None`` for the float32 kernel.
+    """
+    n, d = X.shape
+    if n == 0:
+        return X.new_empty(0), torch.empty(0, dtype=torch.int64, device=X.device)
+    partial = torch.empty(n, device=X.device, dtype=torch.float32)
+    labels = torch.empty(n, device=X.device, dtype=torch.int64)
+    pad = -d % pad_to
+    if pad == 0 and _aligned(X):  # X is used as it is
+        if not _aligned(C):
+            C = _padded(C, 0)
+        _launch(X, C, c_sq, mu, partial, labels, cfg)
+        return partial, labels
+    if X.stride(1) == 1 and C.shape[0] < min_k:  # too few centers to pay for a copy
+        _launch(X, C, c_sq, mu, partial, labels, cfg)
+        return partial, labels
+    if pad or not _aligned(C):
+        C = _padded(C, pad)
+    if mu is not None and pad:
+        mu = _padded(mu[None], pad)[0]
+    row_bytes = max(1, (d + pad) * X.element_size())  # d may be 0
+    block_m = cfg["BLOCK_M"]
+    rows = max(1, _PAD_BYTES // row_bytes // block_m) * block_m
+    for begin in range(0, n, rows):
+        end = min(begin + rows, n)
+        chunk = _padded(X[begin:end], pad)
+        _launch(chunk, C, c_sq, mu, partial[begin:end], labels[begin:end], cfg)
+    return partial, labels
+
+
+def _aligned(T: torch.Tensor) -> bool:
+    return T.stride(1) == 1 and T.stride(0) % _ALIGN == 0 and T.data_ptr() % _ALIGN == 0
+
+
+def _padded(T: torch.Tensor, pad: int) -> torch.Tensor:
+    """A fresh contiguous copy of ``T`` with ``pad`` zero columns appended."""
+    d = T.shape[1]
+    out = T.new_empty(T.shape[0], d + pad)
+    out[:, d:].zero_()  # only the pad columns: the rest is overwritten
+    out[:, :d] = T
+    return out
+
+
+def _launch(
+    X: torch.Tensor,
+    C: torch.Tensor,
+    c_sq: torch.Tensor,
+    mu: torch.Tensor | None,
+    partial: torch.Tensor,
+    labels: torch.Tensor,
+    cfg: dict,
+) -> None:
+    """Run the kernel on ``X`` and ``C`` with unit column stride, writing ``partial`` and ``labels``."""
+    n, d = X.shape
+    # Launch on X's device and its current stream, which the prefetcher waits on.
+    with torch.cuda.device(X.device):
+        _assign_kernel[(triton.cdiv(n, cfg["BLOCK_M"]),)](
+            X,
+            c_sq if mu is None else mu,  # mu is unused when BF16=False
+            C,
+            c_sq,
+            partial,
+            labels,
+            n,
+            C.shape[0],
+            d,
+            X.stride(0),
+            C.stride(0),
+            BF16=mu is not None,
+            **cfg,
+        )
