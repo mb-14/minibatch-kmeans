@@ -128,9 +128,11 @@ _BF16_CONFIG = {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 32, "num_warps": 8, "
 # float32 kernel is short and the copy costs more than the faster loads save
 # (up to 1.8x slower at k=64), so X is only copied when its columns are not
 # contiguous. At 1024 centers padding breaks even at 200-1000 features and wins
-# below; small widths already win from about 400 centers.
+# below; small widths already win from about 400 centers. The bfloat16 kernel
+# is bound by its loads, so padding pays from fewer centers: it loses at 256
+# and wins at 512 (1.06-1.27x at 5-1000 features), up to 2.3x at 16384.
 _ALIGN, _PAD_TO, _PAD_BYTES, _PAD_MIN_K = 16, _BLOCK_K, 1 << 28, 1024
-_BF16_PAD_TO, _BF16_PAD_MIN_K = _BF16_CONFIG["BLOCK_K"], 1024
+_BF16_PAD_TO, _BF16_PAD_MIN_K = _BF16_CONFIG["BLOCK_K"], 512
 assert _PAD_TO % _ALIGN == 0 and _BF16_PAD_TO % _ALIGN == 0
 
 
