@@ -29,6 +29,18 @@ def _why(reason):
     return reason if ta.AVAILABLE else "cannot be imported"
 
 
+def _variants():
+    """How many variants of the kernel Triton has compiled."""
+    kernel = ta._assign_kernel
+    if hasattr(kernel, "device_caches"):  # Triton >= 3.3
+        return sum(len(v[0]) for v in kernel.device_caches.values())
+    return sum(len(per_device) for per_device in kernel.cache.values())
+
+
+# Pad whatever the number of centers, so tests with few centers cover the copy.
+_padding_always = mock.patch.object(ta, "_PAD_MIN_K", 0)
+
+
 class KernelTestCase(unittest.TestCase):
     """Runs with TF32 off, whatever ran before, and restores the setting.
 
@@ -40,6 +52,10 @@ class KernelTestCase(unittest.TestCase):
         tf32 = torch.backends.cuda.matmul.allow_tf32
         torch.backends.cuda.matmul.allow_tf32 = False
         self.addCleanup(setattr, torch.backends.cuda.matmul, "allow_tf32", tf32)
+
+    def _same_bits(self, got, want):
+        for a, b in zip(got, want, strict=True):
+            self.assertTrue(torch.equal(a, b))
 
 
 # n, k, d: tails on every axis, k below one tile, d below one 16-wide step,
@@ -136,6 +152,92 @@ class TestKernelLogic(KernelTestCase):
         C = torch.randn(9, 20, device=KERNEL_DEVICE, generator=g)
         _check_against_reference(self, X, C)
 
+    @_padding_always
+    def test_padding_leaves_results_bit_identical(self):
+        # A width that is not a multiple of 16 is zero-padded before the
+        # kernel; the zeros add exact zeros, so the bits match an unpadded run
+        # (_PAD_TO = 1 turns padding off).
+        g = torch.Generator(device=KERNEL_DEVICE).manual_seed(0)
+        for d in (5, 33, 100):
+            with self.subTest(d=d):
+                X = torch.randn(300, d, device=KERNEL_DEVICE, generator=g)
+                C = torch.randn(70, d, device=KERNEL_DEVICE, generator=g)
+                padded = ta.nearest_centroid(X, C)
+                with mock.patch.object(ta, "_PAD_TO", 1):
+                    self._same_bits(padded, ta.nearest_centroid(X, C))
+
+    @_padding_always
+    def test_strided_inputs_match_a_contiguous_copy(self):
+        # Views go through the chunked copy (8 chunks at width 50, 16 at width
+        # 96, the last one short):
+        # a width that needs padding, a multiple-of-16 width whose row stride
+        # is not, a view offset by one column, and a transposed view.
+        g = torch.Generator(device=KERNEL_DEVICE).manual_seed(1)
+        big = torch.randn(1000, 100, device=KERNEL_DEVICE, generator=g)
+        views = {
+            "width 50, stride 100": big[:, :50],
+            "width 96, stride 100": big[:, :96],
+            "offset by one column": big[:, 1:97],
+            "transposed": torch.randn(96, 1000, device=KERNEL_DEVICE, generator=g).T,
+        }
+        for name, X in views.items():
+            with self.subTest(name):
+                C = torch.randn(40, X.shape[1], device=KERNEL_DEVICE, generator=g)
+                want = ta.nearest_centroid(X.contiguous(), C)
+                with mock.patch.object(ta, "_PAD_BYTES", 1 << 15):
+                    self._same_bits(ta.nearest_centroid(X, C), want)
+
+    def test_misaligned_centers_match_a_fresh_copy(self):
+        # A contiguous view of the centers that starts 4 bytes into its storage,
+        # with an aligned X that is passed through uncopied.
+        g = torch.Generator(device=KERNEL_DEVICE).manual_seed(2)
+        X = torch.randn(300, 96, device=KERNEL_DEVICE, generator=g)
+        C = torch.randn(40 * 96 + 1, device=KERNEL_DEVICE, generator=g)[1:].view(40, 96)
+        self.assertNotEqual(C.data_ptr() % 16, 0)
+        self._same_bits(ta.nearest_centroid(X, C), ta.nearest_centroid(X, C.clone()))
+
+    @_padding_always
+    def test_layout_of_the_centers_does_not_change_the_bits(self):
+        # Transposed centers: their norms come from a contiguous copy, so
+        # nothing depends on how the caller stored them.
+        g = torch.Generator(device=KERNEL_DEVICE).manual_seed(3)
+        for d in (5, 96, 100):
+            with self.subTest(d=d):
+                X = torch.randn(300, d, device=KERNEL_DEVICE, generator=g)
+                C = torch.randn(d, 70, device=KERNEL_DEVICE, generator=g).T
+                self._same_bits(ta.nearest_centroid(X, C), ta.nearest_centroid(X, C.contiguous()))
+
+    def test_broadcast_inputs_match_a_contiguous_copy(self):
+        # Row stride 0 counts as aligned, so these go to the kernel uncopied.
+        g = torch.Generator(device=KERNEL_DEVICE).manual_seed(4)
+        X = torch.randn(1, 96, device=KERNEL_DEVICE, generator=g).expand(300, 96)
+        C = torch.randn(70, 96, device=KERNEL_DEVICE, generator=g)
+        self._same_bits(ta.nearest_centroid(X, C), ta.nearest_centroid(X.contiguous(), C))
+        C = C[:1].expand(70, 96)
+        X = torch.randn(300, 96, device=KERNEL_DEVICE, generator=g)
+        self._same_bits(ta.nearest_centroid(X, C), ta.nearest_centroid(X, C.contiguous()))
+
+    def test_few_centers_skip_the_copy(self):
+        # Below _PAD_MIN_K centers, a contiguous X goes to the kernel as it
+        # is; above, it is padded. The bits match either way.
+        g = torch.Generator(device=KERNEL_DEVICE).manual_seed(5)
+        X = torch.randn(300, 100, device=KERNEL_DEVICE, generator=g)
+        C = torch.randn(70, 100, device=KERNEL_DEVICE, generator=g)
+        for min_k, copies in ((71, 0), (70, 2)):  # 2: one for X, one for C
+            with self.subTest(min_k=min_k), mock.patch.object(ta, "_PAD_MIN_K", min_k):
+                with mock.patch.object(ta, "_padded", wraps=ta._padded) as padded:
+                    got = ta.nearest_centroid(X, C)
+                self.assertEqual(padded.call_count, copies)
+                with _padding_always:
+                    self._same_bits(got, ta.nearest_centroid(X, C))
+
+    def test_zero_features(self):
+        # Every distance is 0, so every row takes center 0.
+        X = torch.empty(10, 0, device=KERNEL_DEVICE)
+        partial, labels = ta.nearest_centroid(X, torch.empty(3, 0, device=KERNEL_DEVICE))
+        self.assertTrue(bool((partial == 0).all()))
+        self.assertTrue(bool((labels == 0).all()))
+
 
 @unittest.skipUnless(CUDA_KERNEL, NEEDS_CUDA_KERNEL)
 class TestKernelCuda(KernelTestCase):
@@ -145,17 +247,26 @@ class TestKernelCuda(KernelTestCase):
         g = torch.Generator(device="cuda").manual_seed(0)
         C = torch.randn(4096, 64, device="cuda", generator=g)
 
-        def variants():
-            kernel = ta._assign_kernel
-            if hasattr(kernel, "device_caches"):  # Triton >= 3.3
-                return sum(len(v[0]) for v in kernel.device_caches.values())
-            return sum(len(per_device) for per_device in kernel.cache.values())
-
         ta.nearest_centroid(torch.randn(8, 64, device="cuda", generator=g), C)
-        before = variants()
+        before = _variants()
         for n in (7, 100, 5000, 16001, 16384):
             ta.nearest_centroid(torch.randn(n, 64, device="cuda", generator=g), C)
-        self.assertEqual(variants(), before)
+        self.assertEqual(_variants(), before)
+
+    @_padding_always
+    def test_chunks_reuse_one_compiled_kernel(self):
+        # Several chunks of padded rows (73 rows of 112 floats fit the patched
+        # budget, rounded down to one 64-row tile): each chunk's outputs start
+        # on a tile, so no chunk compiles a second variant.
+        g = torch.Generator(device="cuda").manual_seed(0)
+        C = torch.randn(256, 100, device="cuda", generator=g)
+        X = torch.randn(1000, 100, device="cuda", generator=g)
+        ta.nearest_centroid(X[:8], C)
+        before = _variants()
+        with mock.patch.object(ta, "_PAD_BYTES", 1 << 15):
+            chunked = ta.nearest_centroid(X, C)
+        self.assertEqual(_variants(), before)
+        self._same_bits(chunked, ta.nearest_centroid(X, C))
 
     def test_ignores_allow_tf32(self):
         # Always full float32 products, whatever PyTorch's matmul setting is.
